@@ -654,17 +654,71 @@ tp_pips = sl_pips × rr
 | Score 70 (bon signal) | 2.0 | 40 pips |
 | Score 85 (signal fort) | 2.5 | 50 pips |
 
-#### Prix SL/TP
+#### Prix SL/TP absolus
+
+Le calcul travaille **entièrement en unités de prix brutes** (via `sym_info.point` de MT5, jamais en pips arbitraires) pour éviter toute ambiguïté de conversion :
 
 ```python
+# ATR en raw price units (high - low du candle M1)
+atr_raw = m1['range'].rolling(14).mean().iloc[-1]
+
+sl_dist = max(plancher_minimum × point, atr_raw × mult)
+
+# Respect de la distance minimale imposée par le broker
+broker_min = sym_info.trade_stops_level × point
+sl_dist = max(sl_dist, broker_min, spread × 2, point × 10)
+
+tp_dist = sl_dist × rr
+
+# Calcul des prix absolus (arrondis aux décimales du symbole)
 # Pour un BUY :
-sl_price = price_ask - sl_pips × pip_size
-tp_price = price_ask + tp_pips × pip_size
+sl_price = round(price_ask - sl_dist, sym_info.digits)
+tp_price = round(price_ask + tp_dist, sym_info.digits)
 
 # Pour un SELL :
-sl_price = price_bid + sl_pips × pip_size
-tp_price = price_bid - tp_pips × pip_size
+sl_price = round(price_bid + sl_dist, sym_info.digits)
+tp_price = round(price_bid - tp_dist, sym_info.digits)
 ```
+
+Ces prix absolus sont transmis directement à `place_order()` — aucune reconversion depuis les pips.
+
+### Étape 2b — Gestion active des positions (Trailing Stop + Breakeven)
+
+**Fichier** : `DTEEngine._manage_open_positions()` — appelée toutes les 10 secondes.
+
+#### Breakeven (mise à zéro du risque)
+
+Déclenchement quand le profit de la position atteint **≥ 50% de la distance SL initiale** :
+
+```python
+# Ex : SL initial = 50 pips → déclenchement quand profit ≥ 25 pips
+be_sl = entry_price + buffer (2% du SL, pour couvrir le spread)
+# Pour BUY : SL déplacé juste au-dessus du prix d'entrée
+# Pour SELL : SL déplacé juste en-dessous du prix d'entrée
+```
+
+→ **Résultat** : la position ne peut plus perdre. Le pire cas est un profit nul (ou légèrement positif).
+
+#### Trailing Stop (verrouillage du profit)
+
+Déclenchement quand le profit atteint **≥ 100% de la distance SL initiale** :
+
+```python
+# Le SL suit le cours à une distance de 50% du SL initial
+# Pour BUY : new_sl = current_price - sl_dist × 0.5
+# Pour SELL : new_sl = current_price + sl_dist × 0.5
+```
+
+→ **Résultat** : le SL se déplace vers le haut à mesure que le prix monte (BUY). Le profit minimum garanti augmente continuellement.
+
+**Exemple complet — BUY Crash 500 (SL initial = 500 pips) :**
+
+| Profit courant | Action | SL déplacé à |
+|---|---|---|
+| 250 pips (50%) | Breakeven | Entry + 2% buffer |
+| 500 pips (100%) | Trailing activé | Current - 250 pips |
+| 800 pips | Trailing mis à jour | Current - 250 pips |
+| Position clôturée par SL | Profit minimum garanti | +250 pips |
 
 ### Étape 2 — Money Manager : calcul de la mise
 
@@ -784,9 +838,10 @@ L'ordre est estampillé avec `MAGIC_NUMBER = 20260617` pour identifier toutes le
 ### Log complet d'un trade
 
 ```
-TRADE BUY Crash 500 Index | Vol:0.02 | Prix:8547.12
-| SL:20.0p TP:50.0p RR:2.5 ATR:8.0p | Score:82
+TRADE BUY Crash 500 Index | Vol:0.02 | Prix:3058.0910 | SL:3043.7660 TP:3083.6160 RR:2.5 ATR:5.9p | Score:82
 ```
+
+Note : SL et TP sont maintenant en **prix absolus** (non en pips), ce qui évite toute erreur de conversion et garantit l'exactitude même si `sym_info.point` diffère de la valeur attendue.
 
 ### Stop de session automatique
 
@@ -833,14 +888,29 @@ La connexion est vérifiée avant chaque opération (`ensure_connected()`). En c
     'volume':       volume,                 # En lots
     'type':         ORDER_TYPE_BUY/SELL,
     'price':        tick.ask / tick.bid,    # Prix courant
-    'sl':           sl_price,              # Prix stop-loss calculé
-    'tp':           tp_price,              # Prix take-profit calculé
-    'deviation':    20,                    # Slippage max autorisé
+    'sl':           sl_price,              # Prix absolu stop-loss (depuis compute_sl_tp_dynamic)
+    'tp':           tp_price,              # Prix absolu take-profit
+    'deviation':    50,                    # Slippage max autorisé (50 points)
     'magic':        20260617,              # Identifiant DTE
     'comment':      'DTE_Crash50_S82',
     'type_time':    ORDER_TIME_GTC,        # Ordre valide jusqu'à annulation
-    'type_filling': ORDER_FILLING_IOC,     # Fill immédiat ou annuler
+    'type_filling': ORDER_FILLING_FOK,     # Fill or Kill (seul mode supporté par Deriv Demo synthetics)
 }
+```
+
+> **Note** : `ORDER_FILLING_IOC` (Immediate or Cancel) n'est **pas supporté** par Deriv Demo sur les indices synthétiques. `ORDER_FILLING_FOK` est le mode correct.
+
+### Modification de position — Trailing Stop et Breakeven
+
+```python
+# Via TRADE_ACTION_SLTP (aucune fermeture/réouverture)
+mt5.order_send({
+    'action':   TRADE_ACTION_SLTP,
+    'symbol':   pos.symbol,
+    'position': ticket,
+    'sl':       new_sl,   # nouveau prix stop-loss
+    'tp':       pos.tp,   # take-profit inchangé
+})
 ```
 
 ### Gestion des positions ouvertes
@@ -980,6 +1050,17 @@ Si `spike_alert_level = 'CRITIQUE'` → notification système Chrome avec nom de
 
 ## 16. Modes de fonctionnement
 
+### Architecture des deux fenêtres de console
+
+Lors du démarrage, le bot **ouvre automatiquement une seconde fenêtre PowerShell** qui affiche les logs détaillés en temps réel (tail du fichier `.log`).
+
+**Fenêtre principale** : affiche seulement :
+- Résumé des positions + P&L toutes les **5 minutes**
+- Chaque TRADE exécuté (en vert) au moment où il se produit
+- Les erreurs critiques
+
+**Fenêtre secondaire "DTE — Logs détaillés"** : affiche tout (cycle par cycle, signal par symbole, ATR, trailing/BE).
+
 ### SIGNAL_ONLY
 
 Calcule et affiche tous les signaux. Aucun ordre envoyé. Le MoneyManager calcule les tailles théoriques sans jamais les exécuter.
@@ -994,7 +1075,7 @@ Même comportement que SIGNAL_ONLY mais affiche une alerte console explicite qua
 
 ### FULL_AUTO
 
-Exécute automatiquement les trades selon le pipeline complet (SL/TP dynamiques, sizing Kelly, règles absolues). Les modifications de mode sont possibles à chaud via l'API ou le popup.
+Exécute automatiquement les trades selon le pipeline complet (SL/TP dynamiques, sizing Kelly, règles absolues). Les modifications de mode sont possibles à chaud via l'API ou le popup. La gestion active des positions (trailing stop, breakeven) est activée en FULL_AUTO.
 
 **Usage** : uniquement après validation approfondie en SIGNAL_ONLY.
 

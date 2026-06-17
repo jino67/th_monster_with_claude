@@ -82,17 +82,32 @@ MT5_SERVER=Deriv-Demo
 python -m main.dte_main --all-symbols --strategy FLAT --mode SIGNAL_ONLY
 ```
 
-Sortie attendue :
+Sortie attendue dans la **fenêtre principale** :
 ```
 ════════════════════════════════════════════════════════════
-DTE Engine démarrage…
-  Symboles : ['Volatility 100 Index', 'Crash 500 Index', ...]
-  Stratégie MM : FLAT
-  Mode : SIGNAL_ONLY
+  DTE v1.0 — SIGNAL_ONLY | 8 symboles | MM:FLAT
+  Logs détaillés: fenêtre "DTE — Logs détaillés"
+  Résumé positions toutes les 5 minutes
 ════════════════════════════════════════════════════════════
-Compte MT5 | Login: 201797413 | Solde: XXXX USD
-API FastAPI démarrée sur http://localhost:8000
-— Crash 500 Index           | Score:  75.2 | BUY   | A: 82 B: 71 C: 68 D: 55 E: 60 | Align:3
+MT5 connecté | Login:201797413 | Solde:10000.0 USD
+```
+
+Puis toutes les 5 minutes :
+```
+════════════════════════════════════════════════════════════
+  18:26:00 | Balance:10000.00$ | Equity:10085.20$ | Session PnL:+85.20$ | Trades:3 | [FULL_AUTO]
+  BUY  Crash 500 Index               Vol:0.02 | PnL:+42.10$
+  SELL Boom 500 Index                Vol:0.05 | PnL:+31.80$
+  BUY  Step Index                    Vol:0.10 | PnL:+11.30$
+════════════════════════════════════════════════════════════
+```
+
+Et dans la **fenêtre secondaire "DTE — Logs détaillés"** :
+```
+18:21:27  ──────────────────────── Cycle 0001  [FULL_AUTO]  18:21:27 ────────
+18:21:28  ▼*Volatility 100 Index          | Score: 58.5 | SELL | A: 50 B: 50 C: 50 D:71 E:50 | Aln:3
+18:21:28  ▲ Crash 500 Index               | Score: 74.7 | BUY  | A:100 B: 50 C: 55 D:62 E:50 | Aln:3
+18:21:30  TRADE BUY Crash 500 Index | Vol:0.02 | Prix:3058.0910 | SL:3043.77 TP:3083.62 RR:2.0 ATR:5.9p | Score:74.7
 ```
 
 ---
@@ -138,6 +153,22 @@ python -m main.dte_main --symbol "Crash 500 Index" --strategy KELLY --mode FULL_
 > **Note** : en FULL_AUTO `--all-symbols`, le bot peut ouvrir jusqu'à 8 positions simultanées
 > (une par symbole). Chaque position est limitée à 2% de risque. Cooldown de 30s par symbole
 > après chaque ordre pour éviter les doublons pendant la latence MT5.
+
+---
+
+## Deux fenêtres — Fenêtre principale vs Logs détaillés
+
+À partir du lancement, le bot gère **deux espaces d'affichage** :
+
+| Fenêtre | Contenu | À quelle fréquence |
+|---|---|---|
+| **Principale** (PS où tu as lancé) | Résumé positions + PnL, chaque TRADE, erreurs critiques | Toutes les 5 min + à chaque trade |
+| **Secondaire** (auto-ouverte) titrée "DTE — Logs détaillés" | Tous les signaux cycle par cycle, ATR, trailing/BE | En temps réel, toutes les 2s |
+
+Si tu veux rouvrir manuellement la fenêtre de logs :
+```powershell
+Get-Content c:\thMonster_v2_Top\logs\dte_20260617.log -Wait -Tail 100
+```
 
 ---
 
@@ -277,6 +308,40 @@ curl -X POST http://localhost:8000/api/symbol -H "Content-Type: application/json
 | Signal courant | `http://localhost:8000/api/signal` |
 | État complet (extension) | `http://localhost:8000/api/full_state` |
 | WebSocket temps réel | `ws://localhost:8000/ws` |
+
+---
+
+## Gestion active des positions — Trailing Stop et Breakeven
+
+En **FULL_AUTO**, le bot surveille les positions ouvertes toutes les **10 secondes** et applique automatiquement :
+
+### Breakeven (mise à zéro du risque)
+
+Dès que le profit d'une position atteint **50% de la distance SL initiale** :
+- Le SL est déplacé au prix d'entrée + un léger buffer (2% du SL pour couvrir le spread)
+- La position ne peut plus être en perte
+- Le TP reste inchangé
+
+```
+Exemple : BUY Crash 500 à 3058.0, SL à 3043.8 (14.2 pips de distance)
+Breakeven déclenché quand prix ≥ 3058.0 + 7.1 pips = 3065.1
+→ SL déplacé à 3058.3 (entry + buffer)
+```
+
+### Trailing Stop
+
+Dès que le profit atteint **100% de la distance SL initiale** :
+- Le SL suit le prix courant à 50% de la distance SL initiale
+- À chaque nouveau prix favorable, le SL monte (BUY) ou descend (SELL)
+
+```
+Exemple (suite) : prix monte à 3072.2 (14.2 pips de profit)
+→ Trailing activé : SL = 3072.2 - 7.1 = 3065.1
+Prix monte encore à 3080.0 :
+→ SL mis à jour : 3080.0 - 7.1 = 3072.9
+```
+
+Le trailing garantit que si le prix recule, tu sors avec un profit minimum de 50% de la distance SL.
 
 ---
 
