@@ -86,6 +86,9 @@ class MT5DataProvider:
         self.server = server
         self.connected = False
         self._max_retries = 3
+        # Cache des specs broker (chargé une fois à la connexion)
+        # {mt5_sym: {vol_min, vol_max, vol_step, tick_size, tick_value, point, digits, stops_level}}
+        self._specs: dict = {}
 
     # ── Connexion ─────────────────────────────────────────────────────────────
     def connect(self) -> bool:
@@ -104,7 +107,39 @@ class MT5DataProvider:
         info = mt5.account_info()
         if info:
             logger.info(f'MT5 connecté | Compte: {info.login} | Solde: {info.balance} | Serveur: {info.server}')
+        # Cache des specs broker pour tous les symboles DTE
+        self._load_symbol_specs()
         return True
+
+    def _load_symbol_specs(self):
+        """Charge et logue les specs broker (lots, tick) pour tous les symboles DTE."""
+        all_mt5_syms = list(set(SYMBOL_MAP.values()))
+        self._specs = {}
+        rows = []
+        for sym in all_mt5_syms:
+            mt5.symbol_select(sym, True)
+            si = mt5.symbol_info(sym)
+            if si is None:
+                continue
+            self._specs[sym] = {
+                'vol_min':     si.volume_min,
+                'vol_max':     si.volume_max,
+                'vol_step':    si.volume_step,
+                'tick_size':   si.trade_tick_size,
+                'tick_value':  si.trade_tick_value,
+                'point':       si.point,
+                'digits':      si.digits,
+                'stops_level': si.trade_stops_level,
+            }
+            rows.append(
+                f'  {sym:34} vol:[{si.volume_min}–{si.volume_max} step={si.volume_step}] '
+                f'tick:[sz={si.trade_tick_size} val={si.trade_tick_value}] '
+                f'point={si.point} stops_lvl={si.trade_stops_level}'
+            )
+        if rows:
+            logger.info('Specs broker chargées :')
+            for r in rows:
+                logger.info(r)
 
     def disconnect(self):
         if MT5_AVAILABLE:
@@ -208,33 +243,53 @@ class MT5DataProvider:
         sl_pips: float = 15.0,
     ) -> float:
         """
-        Calcule le volume en lots pour risquer `risk_amount` avec `sl_pips` de stop.
-        Volume = risk_amount / (sl_pips * pip_size * tick_value_per_lot)
+        Calcule le volume en lots pour risquer `risk_amount` USD avec `sl_pips` de stop.
+        Utilise le cache specs broker chargé à la connexion (volume_min/max/step du broker).
+        Volume = risk_amount / (sl_pips * pip_size * pip_value_per_lot)
         """
-        if not self.ensure_connected():
-            return 0.01
         mt5_sym = SYMBOL_MAP.get(symbol, symbol)
-        sym_info = mt5.symbol_info(mt5_sym)
-        if sym_info is None:
-            return 0.01
+        sp = self._specs.get(mt5_sym)
+        if sp is None:
+            # Fallback : recharger si le cache est vide
+            if self.ensure_connected():
+                mt5.symbol_select(mt5_sym, True)
+                si = mt5.symbol_info(mt5_sym)
+                if si:
+                    sp = {
+                        'vol_min': si.volume_min, 'vol_max': si.volume_max,
+                        'vol_step': si.volume_step, 'tick_size': si.trade_tick_size,
+                        'tick_value': si.trade_tick_value, 'point': si.point,
+                    }
+                    self._specs[mt5_sym] = sp
+            if sp is None:
+                return 0.01
 
-        pip_size = PIP_SIZES.get(mt5_sym, sym_info.point * 10)
-        tick_value = sym_info.trade_tick_value
-        tick_size = sym_info.trade_tick_size
-        if tick_size <= 0 or tick_value <= 0:
-            return sym_info.volume_min
+        vol_min  = sp['vol_min']
+        vol_max  = sp['vol_max']
+        vol_step = sp['vol_step']
+        pip_size = PIP_SIZES.get(mt5_sym, sp['point'])
+        tick_sz  = sp['tick_size']
+        tick_val = sp['tick_value']
 
-        # Valeur monétaire par pip par lot
-        pip_value_per_lot = (pip_size / tick_size) * tick_value
-        if pip_value_per_lot <= 0 or sl_pips <= 0:
-            return sym_info.volume_min
+        if tick_sz <= 0 or tick_val <= 0 or sl_pips <= 0:
+            logger.debug(f'calculate_volume {mt5_sym}: valeurs invalides tick_sz={tick_sz} tick_val={tick_val} sl_pips={sl_pips} → vol_min')
+            return vol_min
+
+        pip_value_per_lot = (pip_size / tick_sz) * tick_val
+        if pip_value_per_lot <= 0:
+            logger.debug(f'calculate_volume {mt5_sym}: pip_value_per_lot={pip_value_per_lot} invalide → vol_min')
+            return vol_min
 
         vol = risk_amount / (sl_pips * pip_value_per_lot)
-        vol = max(sym_info.volume_min, min(sym_info.volume_max, vol))
-        step = sym_info.volume_step
-        vol = round(round(vol / step) * step, 8)
-        # Re-clamp après arrondi (step peut dépasser volume_max)
-        vol = max(sym_info.volume_min, min(sym_info.volume_max, vol))
+        logger.debug(f'calculate_volume {mt5_sym}: risk={risk_amount:.2f} sl_pips={sl_pips:.1f} '
+                     f'pip_val={pip_value_per_lot:.8f} → raw_vol={vol:.4f} '
+                     f'[{vol_min}–{vol_max} step={vol_step}]')
+
+        vol = max(vol_min, min(vol_max, vol))
+        if vol_step > 0:
+            vol = round(round(vol / vol_step) * vol_step, 8)
+        # Re-clamp après arrondi step
+        vol = max(vol_min, min(vol_max, vol))
         return vol
 
     def place_order(
@@ -354,6 +409,154 @@ class MT5DataProvider:
         if positions is None:
             return []
         return [p._asdict() for p in positions if p.magic == MAGIC_NUMBER]
+
+    def _find_swings(self, df, lookback: int = 3, n_candles: int = 60):
+        """
+        Identifie les swing highs et swing lows significatifs dans un DataFrame OHLCV.
+
+        Un swing high est un high plus haut que les `lookback` bougies de chaque côté.
+        Un swing low est un low plus bas que les `lookback` bougies de chaque côté.
+
+        Retourne (sorted_highs, sorted_lows) en valeurs de prix croissantes.
+        """
+        if len(df) < 2 * lookback + 2:
+            return [], []
+        recent  = df.iloc[-n_candles:] if len(df) > n_candles else df
+        arr_h   = recent['high'].values
+        arr_l   = recent['low'].values
+        n       = len(arr_h)
+        highs, lows = set(), set()
+        for i in range(lookback, n - lookback):
+            if arr_h[i] == max(arr_h[max(0, i-lookback) : i+lookback+1]):
+                highs.add(float(arr_h[i]))
+            if arr_l[i] == min(arr_l[max(0, i-lookback) : i+lookback+1]):
+                lows.add(float(arr_l[i]))
+        return sorted(highs), sorted(lows)
+
+    def compute_sl_tp_structural(
+        self,
+        symbol: str,
+        direction: str,
+        m1,
+        m5=None,
+        score: float = 60.0,
+        spike_alert: bool = False,
+    ) -> dict:
+        """
+        SL/TP basés sur la structure du marché (Price Action / SMC).
+
+        SL : derrière le swing high/low le plus proche sous/sur le prix courant
+             (M5 priorité pour la solidité de la structure, M1 en fallback)
+        TP : prochain niveau de liquidité (swing opposé) dans la direction du trade
+             Le RR minimum est imposé selon le score (même règle que dynamic)
+        RR : calculé depuis les niveaux réels de la structure
+
+        Fallback automatique vers compute_sl_tp_dynamic si pas assez de données.
+        """
+        mt5_sym  = SYMBOL_MAP.get(symbol, symbol)
+        sym_info = tick = None
+        if self.ensure_connected():
+            mt5.symbol_select(mt5_sym, True)
+            sym_info = mt5.symbol_info(mt5_sym)
+            tick     = mt5.symbol_info_tick(mt5_sym)
+
+        point   = sym_info.point   if sym_info else PIP_SIZES.get(mt5_sym, 0.001)
+        digits  = sym_info.digits  if sym_info else 5
+        pip_sz  = PIP_SIZES.get(mt5_sym, point)
+
+        if tick is None or m1 is None or len(m1) < 20:
+            return self.compute_sl_tp_dynamic(symbol, direction, m1, score, spike_alert)
+
+        price   = tick.ask if direction == 'BUY' else tick.bid
+        atr_raw = 0.0
+        if len(m1) >= 15:
+            v = m1['range'].rolling(14).mean().iloc[-1]
+            if v == v:
+                atr_raw = float(v)
+
+        # Buffer derrière le swing = 30% ATR ou minimum 5 points
+        buf = max(atr_raw * 0.30, point * 5)
+
+        # ── Swings : M5 si dispo (structure plus solide), sinon M1 ───────────
+        ref_df   = m5 if m5 is not None and len(m5) >= 15 else m1
+        lkb      = 3  if ref_df is m5 else 5
+        sh, sl_s = self._find_swings(ref_df, lookback=lkb, n_candles=60)
+        # Enrichir avec M1 pour plus de liquidité détectée
+        if ref_df is m5 and m1 is not None and len(m1) >= 15:
+            sh1, sl1 = self._find_swings(m1, lookback=5, n_candles=40)
+            sh  = sorted(set(sh)  | set(sh1))
+            sl_s= sorted(set(sl_s)| set(sl1))
+
+        # ── SL derrière la structure ─────────────────────────────────────────
+        if direction == 'BUY':
+            below = [l for l in sl_s if l < price - atr_raw * 0.3]
+            if below:
+                sl_price = round(max(below) - buf, digits)
+            else:
+                d = max(RECOMMENDED_SL_PIPS.get(mt5_sym, 20.0) * point,
+                        atr_raw * SL_ATR_MULT.get(mt5_sym, 1.8))
+                sl_price = round(price - d, digits)
+        else:
+            above = [h for h in sh if h > price + atr_raw * 0.3]
+            if above:
+                sl_price = round(min(above) + buf, digits)
+            else:
+                d = max(RECOMMENDED_SL_PIPS.get(mt5_sym, 20.0) * point,
+                        atr_raw * SL_ATR_MULT.get(mt5_sym, 1.8))
+                sl_price = round(price + d, digits)
+
+        sl_dist = abs(price - sl_price)
+
+        # Plancher broker : stops_level + spread, minimum 20 points
+        if sym_info and tick:
+            spread      = tick.ask - tick.bid
+            broker_floor= max(sym_info.trade_stops_level * point,
+                              spread * 2, atr_raw * 0.5, point * 20)
+            if sl_dist < broker_floor:
+                sl_dist  = broker_floor
+                sl_price = round(
+                    price - sl_dist if direction == 'BUY' else price + sl_dist, digits)
+
+        # ── RR minimum selon score et contexte ───────────────────────────────
+        if spike_alert:   min_rr = 1.2
+        elif score >= 80: min_rr = 2.5
+        elif score >= 65: min_rr = 2.0
+        else:             min_rr = 1.5
+
+        min_tp_dist = sl_dist * min_rr
+
+        # ── TP au prochain niveau de liquidité ───────────────────────────────
+        if direction == 'BUY':
+            # On cherche un swing high au-dessus qui offre au moins le min_rr
+            candidates = [h for h in sh if h > price + min_tp_dist * 0.85]
+            if candidates:
+                tp_price = round(min(candidates), digits)
+                rr = round(abs(tp_price - price) / sl_dist, 2)
+            else:
+                tp_price = round(price + min_tp_dist, digits)
+                rr = min_rr
+        else:
+            candidates = [l for l in sl_s if l < price - min_tp_dist * 0.85]
+            if candidates:
+                tp_price = round(max(candidates), digits)
+                rr = round(abs(tp_price - price) / sl_dist, 2)
+            else:
+                tp_price = round(price - min_tp_dist, digits)
+                rr = min_rr
+
+        # ── Valeurs display en pips (informatif) ─────────────────────────────
+        atr_pips = round(atr_raw / pip_sz, 1) if pip_sz > 0 else 0.0
+        sl_pips  = round(sl_dist / pip_sz,  1) if pip_sz > 0 else 0.0
+        tp_pips  = round(abs(tp_price - price) / pip_sz, 1) if pip_sz > 0 else 0.0
+
+        return {
+            'sl_pips':  sl_pips,
+            'tp_pips':  tp_pips,
+            'rr_ratio': rr,
+            'atr_pips': atr_pips,
+            'sl_price': sl_price,
+            'tp_price': tp_price,
+        }
 
     def compute_sl_tp_dynamic(
         self,

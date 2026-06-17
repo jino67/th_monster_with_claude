@@ -384,7 +384,7 @@ class DTEEngine:
             # Exécution — tous les symboles sont tradables en FULL_AUTO
             # LLM restreint au symbole actif (contrôle du coût API)
             if action != 'WAIT' and self.mode == 'FULL_AUTO':
-                self._execute_trade(symbol, sig_dict, m1)
+                self._execute_trade(symbol, sig_dict, m1, m5)
             elif action != 'WAIT' and self.mode == 'SEMI_AUTO':
                 logger.info(f'[SEMI_AUTO] Signal {action} sur {symbol}. Confirmez dans le popup.')
 
@@ -394,7 +394,7 @@ class DTEEngine:
             logger.error(f'Erreur _process_symbol({symbol}): {e}', exc_info=True)
             return None
 
-    def _execute_trade(self, symbol: str, sig_dict: dict, m1):
+    def _execute_trade(self, symbol: str, sig_dict: dict, m1, m5=None):
         """Exécution d'un trade — FULL_AUTO uniquement."""
         if not self.mm:
             return
@@ -410,14 +410,14 @@ class DTEEngine:
         reduce_size = sig_dict.get('reduce_size', False)
         spike_alert = sig_dict.get('spike_alert', False)
 
-        # ── SL/TP dynamiques (ATR M1 × multiplicateur actif) ─────────────────
-        sl_tp = self.provider.compute_sl_tp_dynamic(
+        # ── SL/TP structurels (swing high/low M5/M1 + liquidité) ─────────────
+        sl_tp = self.provider.compute_sl_tp_structural(
             symbol=symbol,
             direction=action_str,
             m1=m1,
+            m5=m5,
             score=score,
             spike_alert=spike_alert,
-            reduce_size=reduce_size,
         )
         sl_pips  = sl_tp['sl_pips']
         tp_pips  = sl_tp['tp_pips']
