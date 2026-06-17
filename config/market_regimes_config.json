@@ -1,0 +1,339 @@
+{
+  "REGIME_DEFINITIONS": {
+    "TRENDING_MARKET": {
+      "description": "Marché en tendance claire avec mouvement directionnel soutenu",
+      "indicators": {
+        "adx_threshold": 25,
+        "price_change_threshold": 3.0,
+        "ma_alignment_required": true,
+        "volume_confirmation": true
+      },
+      "trading_recommendations": {
+        "primary_strategy": "TREND_FOLLOWING",
+        "secondary_strategy": "BREAKOUT",
+        "risk_multiplier": 1.0,
+        "position_holding": "MEDIUM_TO_LONG",
+        "entry_approach": "PULLBACK_ENTRY"
+      },
+      "parameters": {
+        "sl_multiplier": 0.9,
+        "rr_multiplier": 1.1,
+        "time_stop_multiplier": 1.2
+      }
+    },
+
+    "VOLATILE_MARKET": {
+      "description": "Marché très volatil avec larges mouvements de prix",
+      "indicators": {
+        "atr_threshold": 0.015,
+        "volatility_ratio_threshold": 1.5,
+        "bb_width_threshold": 8.0,
+        "price_oscillation_threshold": 2.0
+      },
+      "trading_recommendations": {
+        "primary_strategy": "BREAKOUT_MOMENTUM",
+        "secondary_strategy": "MEAN_REVERSION",
+        "risk_multiplier": 0.7,
+        "position_holding": "SHORT",
+        "entry_approach": "BREAKOUT_CONFIRMATION"
+      },
+      "parameters": {
+        "sl_multiplier": 1.2,
+        "rr_multiplier": 0.9,
+        "time_stop_multiplier": 0.6
+      }
+    },
+
+    "RANGING_MARKET": {
+      "description": "Marché en range avec oscillation entre support et résistance",
+      "indicators": {
+        "adx_threshold": 20,
+        "price_oscillation_threshold": 2.0,
+        "rsi_range": [30, 70],
+        "bb_squeeze_detection": true
+      },
+      "trading_recommendations": {
+        "primary_strategy": "MEAN_REVERSION",
+        "secondary_strategy": "SCALPING",
+        "risk_multiplier": 0.8,
+        "position_holding": "SHORT",
+        "entry_approach": "EXTREMES_FADING"
+      },
+      "parameters": {
+        "sl_multiplier": 1.0,
+        "rr_multiplier": 1.0,
+        "time_stop_multiplier": 1.0
+      }
+    },
+
+    "NEUTRAL_MARKET": {
+      "description": "Marché calme avec faible volatilité et absence de tendance claire",
+      "indicators": {
+        "atr_threshold": 0.005,
+        "price_change_threshold": 1.0,
+        "adx_threshold": 15,
+        "volume_declining": true
+      },
+      "trading_recommendations": {
+        "primary_strategy": "SCALPING",
+        "secondary_strategy": "RANGE_TRADING",
+        "risk_multiplier": 1.0,
+        "position_holding": "VERY_SHORT",
+        "entry_approach": "MICRO_MOVEMENTS"
+      },
+      "parameters": {
+        "sl_multiplier": 1.1,
+        "rr_multiplier": 0.95,
+        "time_stop_multiplier": 0.8
+      }
+    },
+
+    "MIXED_MARKET": {
+      "description": "Marché avec signaux contradictoires entre différents timeframes",
+      "indicators": {
+        "timeframe_divergence": true,
+        "mixed_technical_signals": true,
+        "volatility_changing": true
+      },
+      "trading_recommendations": {
+        "primary_strategy": "ADAPTIVE_MIXED",
+        "secondary_strategy": "WAIT_FOR_CLARITY",
+        "risk_multiplier": 0.6,
+        "position_holding": "SHORT",
+        "entry_approach": "CONFIRMATION_REQUIRED"
+      },
+      "parameters": {
+        "sl_multiplier": 1.3,
+        "rr_multiplier": 0.9,
+        "time_stop_multiplier": 0.7
+      }
+    }
+  },
+
+  "VOLATILITY_CLASSIFICATION": {
+    "EXTREME_HIGH_VOL": {
+      "atr_percent_threshold": 0.02,
+      "description": "Volatilité extrêmement élevée - risque important, mouvements imprévisibles",
+      "trading_implications": {
+        "max_risk_multiplier": 0.4,
+        "recommended_timeframe": "M5_M15",
+        "avoid_trading": false,
+        "special_considerations": ["SL très large", "TP agressif", "surveillance constante"]
+      }
+    },
+
+    "HIGH_VOL": {
+      "atr_percent_threshold": 0.01,
+      "description": "Volatilité élevée - prudence requise, opportunités de breakout",
+      "trading_implications": {
+        "max_risk_multiplier": 0.7,
+        "recommended_timeframe": "M15_H1",
+        "avoid_trading": false,
+        "special_considerations": ["SL large", "gestion attentive", "éviter les scalping"]
+      }
+    },
+
+    "NORMAL_VOL": {
+      "atr_percent_threshold": 0.005,
+      "description": "Volatilité normale - conditions standards, stratégies classiques applicables",
+      "trading_implications": {
+        "max_risk_multiplier": 1.0,
+        "recommended_timeframe": "M15_H4",
+        "avoid_trading": false,
+        "special_considerations": ["paramètres standards", "diverses stratégies possibles"]
+      }
+    },
+
+    "LOW_VOL": {
+      "atr_percent_threshold": 0.002,
+      "description": "Volatilité faible - opportunités limitées, range trading favorable",
+      "trading_implications": {
+        "max_risk_multiplier": 1.2,
+        "recommended_timeframe": "H1_H4",
+        "avoid_trading": false,
+        "special_considerations": ["SL serré", "patience requise", "meilleur pour range trading"]
+      }
+    },
+
+    "EXTREME_LOW_VOL": {
+      "atr_percent_threshold": 0.001,
+      "description": "Volatilité extrêmement faible - marché stagnant, opportunités rares",
+      "trading_implications": {
+        "max_risk_multiplier": 1.5,
+        "recommended_timeframe": "H4_D1",
+        "avoid_trading": true,
+        "special_considerations": ["attendre la volatilité", "position trading uniquement", "très long terme"]
+      }
+    }
+  },
+
+  "TREND_STRENGTH_LEVELS": {
+    "STRONG_TREND": {
+      "adx_threshold": 40,
+      "price_change_threshold": 8.0,
+      "ma_alignment": "PERFECT",
+      "description": "Tendance forte - forte conviction, mouvements directionnels puissants",
+      "trading_implications": {
+        "confidence_level": "HIGH",
+        "entry_aggressiveness": "MODERATE",
+        "position_size": "NORMAL_TO_HIGH",
+        "risk_adjustment": 1.1
+      }
+    },
+
+    "MODERATE_TREND": {
+      "adx_threshold": 25,
+      "price_change_threshold": 4.0,
+      "ma_alignment": "GOOD",
+      "description": "Tendance modérée - confirmation nécessaire, mouvements directionnels moyens",
+      "trading_implications": {
+        "confidence_level": "MEDIUM",
+        "entry_aggressiveness": "CAUTIOUS",
+        "position_size": "NORMAL",
+        "risk_adjustment": 1.0
+      }
+    },
+
+    "WEAK_TREND": {
+      "adx_threshold": 20,
+      "price_change_threshold": 2.0,
+      "ma_alignment": "PARTIAL",
+      "description": "Tendance faible - prudence, mouvements directionnels limités",
+      "trading_implications": {
+        "confidence_level": "LOW",
+        "entry_aggressiveness": "VERY_CAUTIOUS",
+        "position_size": "REDUCED",
+        "risk_adjustment": 0.8
+      }
+    },
+
+    "NO_TREND": {
+      "adx_threshold": 15,
+      "price_change_threshold": 1.0,
+      "ma_alignment": "MIXED",
+      "description": "Absence de tendance claire - marché directionnel, range trading recommandé",
+      "trading_implications": {
+        "confidence_level": "VERY_LOW",
+        "entry_aggressiveness": "AVOID",
+        "position_size": "MINIMAL",
+        "risk_adjustment": 0.6
+      }
+    }
+  },
+
+  "MARKET_PHASES": {
+    "ACCUMULATION": {
+      "description": "Phase d'accumulation - smart money accumule les positions",
+      "characteristics": ["low_volatility", "sideways_action", "decreasing_volume"],
+      "trading_approach": "GRADUAL_ACCUMULATION",
+      "time_horizon": "LONG_TERM"
+    },
+
+    "MARKUP": {
+      "description": "Phase de hausse - tendance bullish établie",
+      "characteristics": ["increasing_volume", "higher_highs", "bullish_momentum"],
+      "trading_approach": "TREND_FOLLOWING",
+      "time_horizon": "MEDIUM_TERM"
+    },
+
+    "DISTRIBUTION": {
+      "description": "Phase de distribution - smart money distribue les positions",
+      "characteristics": ["high_volatility", "topping_patterns", "divergences"],
+      "trading_approach": "CAUTIOUS_PROFIT_TAKING",
+      "time_horizon": "SHORT_TERM"
+    },
+
+    "MARKDOWN": {
+      "description": "Phase de baisse - tendance bearish établie",
+      "characteristics": ["increasing_volume", "lower_lows", "bearish_momentum"],
+      "trading_approach": "TREND_FOLLOWING_SHORT",
+      "time_horizon": "MEDIUM_TERM"
+    }
+  },
+
+  "SYMBOL_SPECIFIC_SETTINGS": {
+    "VOLATILITY_INDICES": {
+      "applicable_symbols": ["Volatility 10 Index", "Volatility 25 Index", "Volatility 50 Index", "Volatility 100 Index"],
+      "special_considerations": {
+        "base_volatility_multiplier": 1.5,
+        "risk_adjustment": 0.8,
+        "preferred_timeframe": "M5_M15",
+        "avoid_overnight": true
+      }
+    },
+
+    "CRASH_BOOM_INDICES": {
+      "applicable_symbols": ["Crash 500 Index", "Crash 1000 Index", "Boom 1000 Index"],
+      "special_considerations": {
+        "base_volatility_multiplier": 2.0,
+        "risk_adjustment": 0.6,
+        "preferred_timeframe": "M15_H1",
+        "gap_protection": true
+      }
+    },
+
+    "JUMP_INDICES": {
+      "applicable_symbols": ["Jump 10 Index", "Jump 75 Index"],
+      "special_considerations": {
+        "base_volatility_multiplier": 1.8,
+        "risk_adjustment": 0.7,
+        "preferred_timeframe": "M5_M15",
+        "momentum_focus": true
+      }
+    }
+  },
+
+  "SESSION_BASED_ADJUSTMENTS": {
+    "ASIA_SESSION": {
+      "time_range": "00:00-08:00 GMT",
+      "characteristics": ["lower_volatility", "range_bound", "breakout_opportunities_low"],
+      "recommended_strategies": ["SCALPING", "RANGE_TRADING"],
+      "risk_adjustment": 0.9
+    },
+
+    "LONDON_SESSION": {
+      "time_range": "08:00-16:00 GMT",
+      "characteristics": ["high_volatility", "trend_development", "breakout_opportunities_high"],
+      "recommended_strategies": ["TREND_FOLLOWING", "BREAKOUT"],
+      "risk_adjustment": 1.1
+    },
+
+    "NEWYORK_SESSION": {
+      "time_range": "13:00-21:00 GMT",
+      "characteristics": ["very_high_volatility", "strong_trends", "news_impact"],
+      "recommended_strategies": ["MOMENTUM", "BREAKOUT"],
+      "risk_adjustment": 1.0
+    },
+
+    "OVERLAP_SESSION": {
+      "time_range": "13:00-16:00 GMT",
+      "characteristics": ["extreme_volatility", "high_liquidity", "major_moves"],
+      "recommended_strategies": ["BREAKOUT", "MOMENTUM"],
+      "risk_adjustment": 0.8
+    }
+  },
+
+  "ADAPTIVE_LEARNING_SETTINGS": {
+    "PERFORMANCE_THRESHOLDS": {
+      "high_performance": 0.65,
+      "medium_performance": 0.50,
+      "low_performance": 0.35,
+      "blacklist_threshold": 0.25
+    },
+
+    "LEARNING_PARAMETERS": {
+      "pattern_memory_size": 1000,
+      "performance_lookback_days": 30,
+      "confidence_calibration_rate": 0.1,
+      "parameter_optimization_frequency": 24
+    },
+
+    "RISK_ADJUSTMENT_RULES": {
+      "drawdown_5_percent": 0.8,
+      "drawdown_10_percent": 0.5,
+      "drawdown_15_percent": 0.3,
+      "consecutive_losses_3": 0.7,
+      "consecutive_losses_5": 0.5
+    }
+  }
+}

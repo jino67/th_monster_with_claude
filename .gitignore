@@ -1,0 +1,33 @@
+# Fichiers sensibles
+config/credentials.json
+config/*.key
+*.env
+.env
+
+# Fichiers d'état runtime (générés automatiquement)
+dte_live_state.json
+dashboard_live_state.json
+trades_history_v2.csv
+
+# Logs
+logs/
+*.log
+
+# Données temporaires
+data_historical/
+backtests/
+reports/
+
+# Environnement Python
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

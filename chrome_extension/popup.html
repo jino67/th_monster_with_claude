@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DTE — Deriv Trading Ecosystem</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 340px; min-height: 480px;
+      background: #080c23; color: #e8eaf6;
+      font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px;
+    }
+    .header {
+      background: linear-gradient(135deg, #0a0e2a 0%, #0d1545 100%);
+      padding: 14px 16px; border-bottom: 2px solid #00D4FF;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .header-title { color: #00D4FF; font-size: 14px; font-weight: 700; letter-spacing: 1px; }
+    .status-pill {
+      font-size: 10px; padding: 3px 8px; border-radius: 10px;
+      background: rgba(255,68,68,0.2); color: #ff4444; border: 1px solid #ff4444;
+    }
+    .status-pill.online { background: rgba(0,255,136,0.15); color: #00ff88; border-color: #00ff88; }
+
+    .section { padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .section-title { font-size: 9px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+
+    .symbol-selector {
+      width: 100%; background: rgba(255,255,255,0.06); border: 1px solid #333;
+      color: #e8eaf6; padding: 6px 8px; border-radius: 5px; font-size: 12px;
+    }
+    .symbol-selector:focus { outline: none; border-color: #00D4FF; }
+
+    .score-big {
+      text-align: center; padding: 10px 0;
+    }
+    .score-num { font-size: 48px; font-weight: 700; color: #00D4FF; line-height: 1; }
+    .score-sub { font-size: 10px; color: #555; margin-top: 3px; }
+
+    .action-box {
+      text-align: center; padding: 10px; border-radius: 6px; margin: 8px 0;
+      font-size: 16px; font-weight: 700; letter-spacing: 1px;
+      background: rgba(20,20,40,0.6); color: #666; border: 1px solid #333;
+    }
+    .action-box.buy  { background: rgba(0,60,0,0.5); color: #00ff88; border-color: #00ff88; }
+    .action-box.sell { background: rgba(60,0,0,0.5); color: #ff4444; border-color: #ff4444; }
+
+    .models-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 6px 0; }
+    .model-chip {
+      background: rgba(255,255,255,0.04); border-radius: 5px;
+      padding: 5px 3px; text-align: center; border: 1px solid rgba(0,212,255,0.1);
+    }
+    .model-chip .mn { font-size: 8px; color: #555; }
+    .model-chip .mv { font-size: 14px; font-weight: 700; color: #00D4FF; }
+
+    .mode-btns { display: flex; gap: 5px; margin: 6px 0; }
+    .mode-btn {
+      flex: 1; padding: 6px 4px; background: rgba(255,255,255,0.05);
+      border: 1px solid #333; border-radius: 5px; color: #888; cursor: pointer;
+      font-size: 10px; text-align: center; transition: all 0.2s;
+    }
+    .mode-btn:hover { border-color: #00D4FF; color: #00D4FF; }
+    .mode-btn.active { background: rgba(0,212,255,0.15); border-color: #00D4FF; color: #00D4FF; }
+
+    .stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 5px; }
+    .stat-card {
+      background: rgba(255,255,255,0.04); border-radius: 5px;
+      padding: 6px 8px; border: 1px solid rgba(255,255,255,0.05);
+    }
+    .stat-label { font-size: 9px; color: #555; }
+    .stat-val { font-size: 14px; font-weight: 700; color: #e8eaf6; margin-top: 2px; }
+    .stat-val.pos { color: #00ff88; }
+    .stat-val.neg { color: #ff4444; }
+
+    .streak-line { font-size: 11px; color: #777; margin: 4px 0; }
+    .streak-line span { margin-right: 6px; }
+    .up { color: #00ff88; } .down { color: #ff4444; }
+
+    .spike-alert-popup {
+      display: none; padding: 7px; text-align: center;
+      background: rgba(255,100,0,0.15); border: 1px solid #ff8800;
+      border-radius: 5px; color: #ff8800; font-weight: 700; font-size: 11px;
+      margin: 5px 0; animation: blink 1s infinite;
+    }
+    @keyframes blink { 50% { opacity: 0.4; } }
+
+    .footer { padding: 8px 14px; color: #444; font-size: 9px; text-align: center; }
+    a.open-dashboard { color: #00D4FF; text-decoration: none; font-size: 10px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-title">⬡ DTE v1.0</div>
+    <div class="status-pill" id="conn-status">Offline</div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Actif surveillé</div>
+    <select class="symbol-selector" id="sym-select">
+      <option value="Volatility 100 Index">Volatility 100 Index</option>
+      <option value="Volatility 100 (1s) Index">Volatility 100 (1s) Index</option>
+      <option value="Crash 500 Index">Crash 500 Index</option>
+      <option value="Crash 1000 Index">Crash 1000 Index</option>
+      <option value="Boom 500 Index">Boom 500 Index</option>
+      <option value="Boom 1000 Index">Boom 1000 Index</option>
+      <option value="Step Index">Step Index</option>
+      <option value="Range Break 100 Index">Range Break 100 Index</option>
+    </select>
+  </div>
+
+  <div class="section">
+    <div class="score-big">
+      <div class="score-num" id="score">--</div>
+      <div class="score-sub">SCORE COMPOSITE / 100</div>
+    </div>
+    <div class="action-box wait" id="action-box">ATTENDRE</div>
+    <div class="spike-alert-popup" id="spike-popup">⚡ SPIKE IMMINENT !</div>
+    <div class="models-row">
+      <div class="model-chip"><div class="mn">Streaks</div><div class="mv" id="sc-a">--</div></div>
+      <div class="model-chip"><div class="mn">Volatil.</div><div class="mv" id="sc-b">--</div></div>
+      <div class="model-chip"><div class="mn">Event</div><div class="mv" id="sc-c">--</div></div>
+      <div class="model-chip"><div class="mn">MC</div><div class="mv" id="sc-d">--</div></div>
+      <div class="model-chip"><div class="mn">Legacy</div><div class="mv" id="sc-e">--</div></div>
+    </div>
+    <div class="streak-line">
+      M1: <span id="str-m1">--</span>
+      M5: <span id="str-m5">--</span>
+      M15: <span id="str-m15">--</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Mode de trading</div>
+    <div class="mode-btns">
+      <div class="mode-btn active" data-mode="SIGNAL_ONLY">Signal Only</div>
+      <div class="mode-btn" data-mode="SEMI_AUTO">Semi Auto</div>
+      <div class="mode-btn" data-mode="FULL_AUTO">Full Auto</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Statistiques de session</div>
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-val" id="st-trades">0</div></div>
+      <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-val" id="st-wr">—%</div></div>
+      <div class="stat-card"><div class="stat-label">PnL</div><div class="stat-val" id="st-pnl">0.00</div></div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a class="open-dashboard" href="http://localhost:8000/docs" target="_blank">⎘ Ouvrir API Docs</a>
+    &nbsp;|&nbsp; <span id="last-update">--:--:--</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
