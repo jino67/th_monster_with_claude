@@ -45,7 +45,7 @@ PIP_SIZES: Dict[str, float] = {
     'Range Break 100 Index':      0.1,
 }
 
-# Stop-loss recommandés en pips (Bible v1.0)
+# Stop-loss minimum en pips — plancher absolu (Bible v1.0)
 RECOMMENDED_SL_PIPS: Dict[str, float] = {
     'Volatility 100 Index':       20.0,
     'Volatility 100 (1s) Index':  25.0,
@@ -55,6 +55,20 @@ RECOMMENDED_SL_PIPS: Dict[str, float] = {
     'Boom 1000 Index':            25.0,
     'Step Index':                 30.0,
     'Range Break 100 Index':      50.0,
+}
+
+# Multiplicateur ATR pour le SL dynamique — par actif
+# Crash/Boom : spikes brusques → SL plus large pour éviter le stop-hunt
+# Step Index  : mouvements réguliers → SL serré suffisant
+SL_ATR_MULT: Dict[str, float] = {
+    'Crash 500 Index':            2.5,
+    'Crash 1000 Index':           2.5,
+    'Boom 500 Index':             2.5,
+    'Boom 1000 Index':            2.5,
+    'Volatility 100 Index':       1.8,
+    'Volatility 100 (1s) Index':  2.0,
+    'Step Index':                 1.2,
+    'Range Break 100 Index':      1.5,
 }
 
 MAGIC_NUMBER = 20260617  # Identifiant unique de l'écosystème DTE
@@ -216,12 +230,12 @@ class MT5DataProvider:
             return sym_info.volume_min
 
         vol = risk_amount / (sl_pips * pip_value_per_lot)
-        # Respecter les contraintes MT5
         vol = max(sym_info.volume_min, min(sym_info.volume_max, vol))
-        # Arrondir au step
         step = sym_info.volume_step
         vol = round(round(vol / step) * step, 8)
-        return max(sym_info.volume_min, vol)
+        # Re-clamp après arrondi (step peut dépasser volume_max)
+        vol = max(sym_info.volume_min, min(sym_info.volume_max, vol))
+        return vol
 
     def place_order(
         self,
@@ -231,6 +245,8 @@ class MT5DataProvider:
         sl_pips: float = 0.0,
         tp_pips: float = 0.0,
         comment: str = '',
+        sl_price: float = 0.0,   # prix absolu SL (prioritaire sur sl_pips)
+        tp_price: float = 0.0,   # prix absolu TP (prioritaire sur tp_pips)
     ) -> dict:
         """Place un ordre sur un actif synthétique via MT5."""
         if not self.ensure_connected():
@@ -249,12 +265,17 @@ class MT5DataProvider:
         price = tick.ask if direction == 'BUY' else tick.bid
         point = sym_info.point
 
-        sl = 0.0
-        tp = 0.0
-        if sl_pips > 0:
-            sl = price - sl_pips * point if direction == 'BUY' else price + sl_pips * point
-        if tp_pips > 0:
-            tp = price + tp_pips * point if direction == 'BUY' else price - tp_pips * point
+        # Utilise les prix absolus si fournis, sinon calcule depuis pips
+        if sl_price > 0 and tp_price > 0:
+            sl = sl_price
+            tp = tp_price
+        else:
+            sl = 0.0
+            tp = 0.0
+            if sl_pips > 0:
+                sl = price - sl_pips * point if direction == 'BUY' else price + sl_pips * point
+            if tp_pips > 0:
+                tp = price + tp_pips * point if direction == 'BUY' else price - tp_pips * point
 
         request = {
             'action':       mt5.TRADE_ACTION_DEAL,
@@ -264,11 +285,11 @@ class MT5DataProvider:
             'price':        price,
             'sl':           sl,
             'tp':           tp,
-            'deviation':    20,
+            'deviation':    50,
             'magic':        MAGIC_NUMBER,
             'comment':      comment[:31],
             'type_time':    mt5.ORDER_TIME_GTC,
-            'type_filling': mt5.ORDER_FILLING_IOC,
+            'type_filling': mt5.ORDER_FILLING_FOK,
         }
 
         result = mt5.order_send(request)
@@ -317,7 +338,7 @@ class MT5DataProvider:
             'magic':        MAGIC_NUMBER,
             'comment':      f'Close #{ticket}',
             'type_time':    mt5.ORDER_TIME_GTC,
-            'type_filling': mt5.ORDER_FILLING_IOC,
+            'type_filling': mt5.ORDER_FILLING_FOK,
         }
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
@@ -333,6 +354,111 @@ class MT5DataProvider:
         if positions is None:
             return []
         return [p._asdict() for p in positions if p.magic == MAGIC_NUMBER]
+
+    def compute_sl_tp_dynamic(
+        self,
+        symbol: str,
+        direction: str,
+        m1: 'pd.DataFrame',
+        score: float = 60.0,
+        spike_alert: bool = False,
+        reduce_size: bool = False,
+    ) -> dict:
+        """
+        Calcule SL et TP dynamiquement depuis l'ATR M1 courant.
+
+        Travaille entièrement en unités de prix brutes (sym_info.point) pour
+        éviter toute conversion pip→point incorrecte.
+
+        SL = max(plancher, ATR_14 × mult, distance_mini_broker)
+        TP = SL × RR    (RR : spike→1.2 | ≥80→2.5 | ≥65→2.0 | sinon→1.5)
+        """
+        mt5_sym = SYMBOL_MAP.get(symbol, symbol)
+
+        # ── Infos symbole depuis MT5 (source de vérité) ──────────────────────
+        sym_info = None
+        tick = None
+        if self.ensure_connected():
+            mt5.symbol_select(mt5_sym, True)
+            sym_info = mt5.symbol_info(mt5_sym)
+            tick = mt5.symbol_info_tick(mt5_sym)
+
+        point = sym_info.point if sym_info else PIP_SIZES.get(mt5_sym, 0.001)
+
+        # ── ATR 14 périodes en unités de prix brutes ──────────────────────────
+        atr_raw = 0.0
+        if m1 is not None and len(m1) >= 15:
+            v = m1['range'].rolling(14).mean().iloc[-1]
+            if v == v:   # test NaN
+                atr_raw = float(v)
+
+        # ── SL distance en prix bruts ─────────────────────────────────────────
+        atr_mult   = SL_ATR_MULT.get(mt5_sym, 1.8)
+        min_sl_raw = RECOMMENDED_SL_PIPS.get(mt5_sym, 20.0) * point
+        sl_dist    = max(min_sl_raw, atr_raw * atr_mult)
+
+        # Respecter la distance minimale imposée par le broker (trade_stops_level)
+        if sym_info and tick:
+            spread        = tick.ask - tick.bid
+            broker_min    = sym_info.trade_stops_level * point
+            sl_dist = max(sl_dist, broker_min, spread * 2, point * 10)
+
+        # ── RR ratio ─────────────────────────────────────────────────────────
+        if spike_alert:
+            rr = 1.2
+        elif score >= 80:
+            rr = 2.5
+        elif score >= 65:
+            rr = 2.0
+        else:
+            rr = 1.5
+
+        tp_dist = sl_dist * rr
+
+        # ── Prix absolus SL/TP ────────────────────────────────────────────────
+        sl_price = tp_price = 0.0
+        if tick:
+            price = tick.ask if direction == 'BUY' else tick.bid
+            digits = sym_info.digits if sym_info else 5
+            if direction == 'BUY':
+                sl_price = round(price - sl_dist, digits)
+                tp_price = round(price + tp_dist, digits)
+            else:
+                sl_price = round(price + sl_dist, digits)
+                tp_price = round(price - tp_dist, digits)
+
+        # Valeurs display en pips (informatif dans les logs)
+        pip_size = PIP_SIZES.get(mt5_sym, point)
+        atr_pips = round(atr_raw / pip_size, 1) if pip_size > 0 else 0.0
+        sl_pips  = round(sl_dist  / pip_size, 1) if pip_size > 0 else 0.0
+        tp_pips  = round(tp_dist  / pip_size, 1) if pip_size > 0 else 0.0
+
+        return {
+            'sl_pips':  sl_pips,
+            'tp_pips':  tp_pips,
+            'rr_ratio': rr,
+            'atr_pips': atr_pips,
+            'sl_price': sl_price,
+            'tp_price': tp_price,
+        }
+
+    def modify_position_sl(self, ticket: int, new_sl: float, new_tp: float = 0.0) -> bool:
+        """Modifie le SL (et optionnellement TP) d'une position ouverte via TRADE_ACTION_SLTP."""
+        if not self.ensure_connected():
+            return False
+        pos_list = mt5.positions_get(ticket=ticket)
+        if not pos_list:
+            return False
+        pos = pos_list[0]
+        request = {
+            'action':   mt5.TRADE_ACTION_SLTP,
+            'symbol':   pos.symbol,
+            'position': ticket,
+            'sl':       new_sl,
+            'tp':       new_tp if new_tp > 0 else pos.tp,
+        }
+        result = mt5.order_send(request)
+        return bool(result and result.retcode == mt5.TRADE_RETCODE_DONE)
 
     def close_all_positions(self) -> List[dict]:
         """Urgence : ferme toutes les positions DTE."""

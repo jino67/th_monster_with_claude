@@ -18,9 +18,12 @@ import time
 import json
 import logging
 import argparse
+import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+from colorama import init as _colorama_init, Fore, Style
+_colorama_init()
 
 # Ajout du root au path
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,20 +34,55 @@ from engine.mt5_data_provider import MT5DataProvider, SYMBOL_MAP
 from engine.signal_fusion import SignalFusion
 from engine.money_manager import MoneyManager
 from engine.llm_advisor import LLMAdvisor
-from engine.mt5_data_provider import RECOMMENDED_SL_PIPS
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_DIR = ROOT / 'logs'
 LOG_DIR.mkdir(exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_DIR / f'dte_{datetime.now():%Y%m%d}.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout),
-    ],
-)
-logger = logging.getLogger('dte.main')
+
+_G  = Fore.GREEN   + Style.BRIGHT
+_R  = Fore.RED     + Style.BRIGHT
+_Y  = Fore.YELLOW
+_C  = Fore.CYAN
+_DM = Style.DIM
+_BL = Fore.BLUE    + Style.BRIGHT
+_RS = Style.RESET_ALL
+
+class _ColorFmt(logging.Formatter):
+    def format(self, record):
+        msg = super().format(record)
+        raw = record.getMessage()
+        if '| Score:' in raw:
+            if raw.startswith('▲'):   return f'{_G}{msg}{_RS}'
+            if raw.startswith('▼'):   return f'{_R}{msg}{_RS}'
+            return f'{_DM}{msg}{_RS}'
+        if raw.startswith('TRADE '):   return f'{_G}{msg}{_RS}'
+        if raw.startswith('[BE]') or raw.startswith('[TRAIL]'): return f'{_C}{msg}{_RS}'
+        if raw.startswith('══') or raw.startswith('─'):  return f'{_C}{msg}{_RS}'
+        if raw.startswith('[LLM]') or raw.startswith('[SEMI_AUTO]'): return f'{_C}{msg}{_RS}'
+        if raw.startswith('DTE Engine') or raw.startswith('Compte MT5'): return f'{_BL}{msg}{_RS}'
+        if record.levelno >= logging.ERROR:   return f'{_R}{msg}{_RS}'
+        if record.levelno == logging.WARNING: return f'{_Y}{msg}{_RS}'
+        return msg
+
+class _SummaryFilter(logging.Filter):
+    """Ne laisse passer que les logs dte.summary et les erreurs (console principale)."""
+    def filter(self, record):
+        return record.name == 'dte.summary' or record.levelno >= logging.ERROR
+
+# File handler — tout (debug+info), plain text
+_log_file = LOG_DIR / f'dte_{datetime.now():%Y%m%d}.log'
+_fh = logging.FileHandler(_log_file, encoding='utf-8')
+_fh.setFormatter(logging.Formatter('%(asctime)s [%(name)s] %(levelname)s: %(message)s'))
+_fh.setLevel(logging.DEBUG)
+
+# Console handler — seulement le résumé et les erreurs, avec couleurs
+_ch = logging.StreamHandler(sys.stdout)
+_ch.setFormatter(_ColorFmt('%(asctime)s  %(message)s', datefmt='%H:%M:%S'))
+_ch.addFilter(_SummaryFilter())
+
+logging.basicConfig(level=logging.DEBUG, handlers=[_fh, _ch])
+logger  = logging.getLogger('dte.main')     # détails → fichier uniquement
+summary = logging.getLogger('dte.summary')  # résumé  → console uniquement
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 STATE_FILE    = ROOT / 'dashboard_live_state.json'   # compatible avec l'ancien dashboard
@@ -61,7 +99,14 @@ DEFAULT_SYMBOLS = [
     'Range Break 100 Index',
 ]
 
-LOOP_SLEEP_SEC = 2  # intervalle entre chaque cycle
+LOOP_SLEEP_SEC    = 2    # intervalle entre chaque cycle
+SUMMARY_INTERVAL  = 300  # résumé console toutes les 5 minutes
+MANAGE_INTERVAL   = 10   # gestion trailing/BE toutes les 10s
+
+# ── Paramètres trailing stop / breakeven ─────────────────────────────────────
+BE_TRIGGER        = 0.5  # déclenche BE quand profit ≥ 50% du SL initial
+TRAIL_TRIGGER     = 1.0  # déclenche trailing quand profit ≥ 100% du SL initial
+TRAIL_DISTANCE    = 0.5  # trail à 50% du SL initial depuis le cours courant
 
 # ── État global partagé avec l'API ────────────────────────────────────────────
 _state = {
@@ -132,8 +177,28 @@ class DTEEngine:
         self._running = False
         _state['mode'] = mode
         _state['active_symbol'] = symbols[0] if symbols else ''
+        self._order_cooldown: dict = {}
+        self._order_cooldown_sec = 30
+        self._last_summary  = 0.0   # timestamp du dernier résumé console
+        self._last_manage   = 0.0   # timestamp de la dernière gestion des positions
+
+    def _open_log_window(self):
+        """Ouvre un second terminal PowerShell qui suit le fichier de logs en temps réel."""
+        try:
+            CREATE_NEW_CONSOLE = getattr(subprocess, 'CREATE_NEW_CONSOLE', 0x00000010)
+            subprocess.Popen(
+                ['powershell', '-NoExit', '-Command',
+                 f'$Host.UI.RawUI.WindowTitle = "DTE — Logs détaillés"; '
+                 f'Get-Content "{_log_file}" -Wait -Tail 80'],
+                creationflags=CREATE_NEW_CONSOLE,
+            )
+        except Exception as e:
+            summary.warning(f'Impossible d\'ouvrir la fenêtre de logs: {e}')
 
     def start(self):
+        # Ouvrir la fenêtre de logs avant tout
+        self._open_log_window()
+
         logger.info('═' * 60)
         logger.info('DTE Engine démarrage…')
         logger.info(f'  Symboles : {self.symbols}')
@@ -141,13 +206,20 @@ class DTEEngine:
         logger.info(f'  Mode : {self.mode}')
         logger.info('═' * 60)
 
+        summary.info(f'{"═"*60}')
+        summary.info(f'  DTE v1.0 — {self.mode} | {len(self.symbols)} symboles | MM:{self.strategy}')
+        summary.info(f'  Logs détaillés: fenêtre "DTE — Logs détaillés"')
+        summary.info(f'  Résumé positions toutes les {SUMMARY_INTERVAL//60} minutes')
+        summary.info(f'{"═"*60}')
+
         if not self.provider.connect():
-            logger.error('Impossible de se connecter à MT5. Arrêt.')
+            summary.error('Impossible de se connecter à MT5. Arrêt.')
             return
 
         account = self.provider.get_account_info()
         balance = account.get('balance', 100.0)
         logger.info(f'Compte MT5 | Login: {account.get("login")} | Solde: {balance} {account.get("currency","USD")}')
+        summary.info(f'MT5 connecté | Login:{account.get("login")} | Solde:{balance} {account.get("currency","USD")}')
 
         self.mm = MoneyManager(
             initial_capital=balance,
@@ -168,19 +240,26 @@ class DTEEngine:
         cycle = 0
         while self._running:
             cycle += 1
-            cycle_start = time.time()
+            now   = time.time()
+            cycle_start = now
 
-            # Relire le mode depuis l'état (modifiable par l'API)
-            self.mode = _state.get('mode', self.mode)
+            # Relire le mode
+            self.mode  = _state.get('mode', self.mode)
             active_sym = _state.get('active_symbol', self.symbols[0])
 
-            # Mise à jour compte
+            # Mise à jour compte toutes les 30 cycles
             if cycle % 30 == 0:
                 acc = self.provider.get_account_info()
                 if acc:
                     _state['account'] = acc
 
-            # Traitement de chaque symbole
+            # Gestion trailing stop / breakeven toutes les MANAGE_INTERVAL secondes
+            if now - self._last_manage >= MANAGE_INTERVAL:
+                self._manage_open_positions()
+                self._last_manage = now
+
+            # Traitement des signaux pour chaque symbole
+            logger.info(f'{"─"*28} Cycle {cycle:04d}  [{self.mode}]  {datetime.now():%H:%M:%S} {"─"*8}')
             all_signals = {}
             for symbol in self.symbols:
                 sig_dict = self._process_symbol(symbol, is_active=(symbol == active_sym))
@@ -193,13 +272,76 @@ class DTEEngine:
             _state['last_update'] = datetime.now().isoformat()
 
             write_state()
-
-            # Essaie de notifier l'API FastAPI si elle tourne
             self._try_notify_api()
 
+            # Résumé console toutes les SUMMARY_INTERVAL secondes
+            if now - self._last_summary >= SUMMARY_INTERVAL:
+                self._print_summary()
+                self._last_summary = now
+
             elapsed = time.time() - cycle_start
-            sleep = max(0.1, LOOP_SLEEP_SEC - elapsed)
-            time.sleep(sleep)
+            time.sleep(max(0.1, LOOP_SLEEP_SEC - elapsed))
+
+    def _print_summary(self):
+        """Affiche un résumé positions + PnL dans la fenêtre principale toutes les 5 min."""
+        positions = self.provider.get_open_positions()
+        acc       = self.provider.get_account_info()
+        balance   = acc.get('balance', 0)
+        equity    = acc.get('equity',  0)
+        profit    = acc.get('profit',  0)
+        n_trades  = _state.get('session_stats', {}).get('trades', 0)
+
+        pl_c = _G if profit >= 0 else _R
+        summary.info(f'{"═"*60}')
+        summary.info(f'  {datetime.now():%H:%M:%S} | Balance:{balance:.2f}$ | Equity:{equity:.2f}$ | '
+                     f'Session PnL:{pl_c}{profit:+.2f}${_RS} | Trades:{n_trades} | [{self.mode}]')
+        if not positions:
+            summary.info('  Aucune position ouverte')
+        else:
+            for p in positions:
+                t   = 'BUY ' if p.get('type', 0) == 0 else 'SELL'
+                pl  = p.get('profit', 0)
+                sym = p.get('symbol', '')
+                vol = p.get('volume', 0)
+                pc  = _G if pl >= 0 else _R
+                summary.info(f'  {t} {sym:30} Vol:{vol} | PnL:{pc}{pl:+.2f}${_RS}')
+        summary.info(f'{"═"*60}')
+
+    def _manage_open_positions(self):
+        """Gestion active : Breakeven (profit≥50% SL) et Trailing Stop (profit≥100% SL)."""
+        for pos in self.provider.get_open_positions():
+            ticket  = pos.get('ticket')
+            is_buy  = pos.get('type', 0) == 0
+            entry   = pos.get('price_open', 0.0)
+            current = pos.get('price_current', entry)
+            sl      = pos.get('sl',  0.0)
+            tp      = pos.get('tp',  0.0)
+
+            if sl == 0.0 or entry == 0.0:
+                continue
+            sl_dist     = abs(entry - sl)
+            if sl_dist  < 1e-10:
+                continue
+            profit_dist = (current - entry) if is_buy else (entry - current)
+
+            # ── Breakeven ─────────────────────────────────────────────────────
+            if profit_dist >= sl_dist * BE_TRIGGER:
+                buffer = sl_dist * 0.02
+                be_sl  = round((entry + buffer) if is_buy else (entry - buffer), 5)
+                needs_be = (is_buy and sl < be_sl - 1e-6) or (not is_buy and sl > be_sl + 1e-6)
+                if needs_be and self.provider.modify_position_sl(ticket, be_sl, tp):
+                    logger.info(f'[BE] #{ticket} {pos["symbol"]} → SL déplacé à {be_sl} (breakeven)')
+
+            # ── Trailing Stop ─────────────────────────────────────────────────
+            if profit_dist >= sl_dist * TRAIL_TRIGGER:
+                new_sl = round(
+                    (current - sl_dist * TRAIL_DISTANCE) if is_buy
+                    else (current + sl_dist * TRAIL_DISTANCE), 5
+                )
+                needs_trail = (is_buy and new_sl > sl + 1e-6) or (not is_buy and new_sl < sl - 1e-6)
+                if needs_trail and self.provider.modify_position_sl(ticket, new_sl, tp):
+                    logger.info(f'[TRAIL] #{ticket} {pos["symbol"]} → SL={new_sl} '
+                                f'(profit:{profit_dist:.4f} > {sl_dist*TRAIL_TRIGGER:.4f})')
 
     def _process_symbol(self, symbol: str, is_active: bool) -> dict:
         """Calcule le signal pour un symbole et exécute si nécessaire."""
@@ -224,23 +366,26 @@ class DTEEngine:
                     sig_dict['action'] = 'WAIT'
                     logger.info(f'[LLM] Signal {symbol} annulé: {llm_advice.get("reason")}')
 
-            # Log condensé
+            # Log condensé — couleurs via _ColorFmt (▲=vert, ▼=rouge, —=gris)
             action = sig_dict['action']
             score  = sig_dict['score']
             icon = '▲' if action == 'BUY' else ('▼' if action == 'SELL' else '—')
             sc = sig_dict["scores"]
-            logger.info(f'{icon} {symbol:30s} | Score: {score:5.1f} | {action:5s} | '
-                        f'A:{sc["A"]:4.0f} B:{sc["B"]:4.0f} C:{sc["C"]:4.0f} '
-                        f'D:{sc["D"]:4.0f} E:{sc["E"]:4.0f} | Align:{sig_dict["alignment"]}')
+            active_marker = '*' if is_active else ' '
+            spike_lvl = sig_dict.get('spike_alert_level', '')
+            spike_tag = f' ⚡{spike_lvl}' if spike_lvl in ('HAUTE', 'CRITIQUE') else ''
+            logger.info(f'{icon}{active_marker}{symbol:29s} | Score:{score:5.1f} | {action:4s} | '
+                        f'A:{sc["A"]:3.0f} B:{sc["B"]:3.0f} C:{sc["C"]:3.0f} '
+                        f'D:{sc["D"]:3.0f} E:{sc["E"]:3.0f} | Aln:{sig_dict["alignment"]}{spike_tag}')
 
-            # Alerte spike
-            if sig_dict.get('spike_alert') and sig_dict.get('spike_alert_level') in ('HAUTE', 'CRITIQUE'):
-                add_alert(f'⚡ SPIKE {sig_dict["spike_alert_level"]} sur {symbol}', level='WARN')
+            if sig_dict.get('spike_alert') and spike_lvl in ('HAUTE', 'CRITIQUE'):
+                add_alert(f'SPIKE {spike_lvl} sur {symbol}', level='WARN')
 
-            # Exécution si mode auto et signal actif
-            if is_active and action != 'WAIT' and self.mode == 'FULL_AUTO':
+            # Exécution — tous les symboles sont tradables en FULL_AUTO
+            # LLM restreint au symbole actif (contrôle du coût API)
+            if action != 'WAIT' and self.mode == 'FULL_AUTO':
                 self._execute_trade(symbol, sig_dict, m1)
-            elif is_active and action != 'WAIT' and self.mode == 'SEMI_AUTO':
+            elif action != 'WAIT' and self.mode == 'SEMI_AUTO':
                 logger.info(f'[SEMI_AUTO] Signal {action} sur {symbol}. Confirmez dans le popup.')
 
             return sig_dict
@@ -259,55 +404,89 @@ class DTEEngine:
         if balance <= 0:
             return
 
-        # Calcul de la mise
+        score       = sig_dict['score']
+        direction   = sig_dict['direction']
+        action_str  = 'BUY' if direction > 0 else 'SELL'
+        reduce_size = sig_dict.get('reduce_size', False)
+        spike_alert = sig_dict.get('spike_alert', False)
+
+        # ── SL/TP dynamiques (ATR M1 × multiplicateur actif) ─────────────────
+        sl_tp = self.provider.compute_sl_tp_dynamic(
+            symbol=symbol,
+            direction=action_str,
+            m1=m1,
+            score=score,
+            spike_alert=spike_alert,
+            reduce_size=reduce_size,
+        )
+        sl_pips  = sl_tp['sl_pips']
+        tp_pips  = sl_tp['tp_pips']
+        rr       = sl_tp['rr_ratio']
+        atr_p    = sl_tp['atr_pips']
+        sl_price = sl_tp['sl_price']
+        tp_price = sl_tp['tp_price']
+
+        # ── Money Manager avec RR dynamique ──────────────────────────────────
         sizing = self.mm.get_position_size(
-            signal_score=sig_dict['score'],
-            win_prob=max(50.0, sig_dict['score']),
-            rr_ratio=1.5,
+            signal_score=score,
+            win_prob=max(50.0, score),
+            rr_ratio=rr,
         )
 
         if sizing.action != 'TRADE':
             logger.warning(f'[MM] {sizing.action}: {sizing.reason}')
             if sizing.action == 'STOP_SESSION':
-                add_alert(f'⛔ SESSION STOPPÉE: {sizing.reason}', level='CRITIQUE')
+                add_alert(f'SESSION STOPPEE: {sizing.reason}', level='CRITIQUE')
                 self.mode = 'SIGNAL_ONLY'
                 _state['mode'] = 'SIGNAL_ONLY'
             return
 
-        sl_pips = RECOMMENDED_SL_PIPS.get(symbol, 15.0)
-        if sig_dict.get('reduce_size'):
-            sl_pips *= 1.3  # Élargir le SL si alignement faible
-
+        # ── Volume en lots, réduit si alignement faible ───────────────────────
         volume = self.provider.calculate_volume(symbol, sizing.amount, sl_pips)
         if volume <= 0:
             return
+        if reduce_size:
+            volume = round(volume * 0.75, 8)
 
-        direction = sig_dict['direction']
-        action_str = 'BUY' if direction > 0 else 'SELL'
-        comment = f'DTE_{symbol[:8]}_S{sig_dict["score"]:.0f}'
-
-        # Vérification : pas de position déjà ouverte sur ce symbole
-        existing = self.provider.get_open_positions(symbol)
-        if existing:
-            logger.info(f'Position déjà ouverte sur {symbol} — on skip')
+        # Cooldown local — évite les doublons pendant la latence de confirmation MT5
+        last_order_time = self._order_cooldown.get(symbol, 0)
+        if time.time() - last_order_time < self._order_cooldown_sec:
             return
 
+        # Vérification MT5 — pas de position déjà ouverte sur ce symbole
+        existing = self.provider.get_open_positions(symbol)
+        if existing:
+            logger.info(f'Position deja ouverte sur {symbol} — skip')
+            return
+
+        # Marquer le cooldown AVANT l'envoi (bloque les cycles suivants même si MT5 est lent)
+        self._order_cooldown[symbol] = time.time()
+
+        comment = f'DTE_{symbol[:8]}_S{score:.0f}'
         result = self.provider.place_order(
             symbol=symbol,
             direction=action_str,
             volume=volume,
             sl_pips=sl_pips,
+            tp_pips=tp_pips,
+            sl_price=sl_price,
+            tp_price=tp_price,
             comment=comment,
         )
 
         if result.get('success'):
-            msg = f'✅ TRADE {action_str} {symbol} | Vol:{volume} | Prix:{result["price"]} | SL:{sl_pips}pips | Score:{sig_dict["score"]}'
+            msg = (f'TRADE {action_str} {symbol} | Vol:{volume} | Prix:{result["price"]:.4f} '
+                   f'| SL:{sl_price:.4f} TP:{tp_price:.4f} RR:{rr} ATR:{atr_p:.1f}p '
+                   f'| Score:{score}{" [REDUIT]" if reduce_size else ""}')
             logger.info(msg)
+            summary.info(f'{_G}TRADE{_RS} {action_str} {symbol} | Vol:{volume} | RR:{rr} | Score:{score}')
             add_alert(msg, level='TRADE')
             _state['session_stats']['trades'] += 1
         else:
-            logger.error(f'❌ Ordre refusé: {result.get("error")}')
-            add_alert(f'❌ Ordre refusé: {result.get("error")}', level='ERROR')
+            err = result.get("error", "?")
+            logger.error(f'Ordre refuse: {err} | {symbol} {action_str} SL={sl_price:.4f} TP={tp_price:.4f}')
+            add_alert(f'Ordre refuse: {err}', level='ERROR')
+            self._order_cooldown.pop(symbol, None)
 
     def _try_notify_api(self):
         """Tente de mettre à jour le state dans l'API FastAPI si elle tourne."""

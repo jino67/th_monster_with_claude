@@ -126,14 +126,15 @@ class CrashBoomStrategy:
         """
         score = 0
         action = "HOLD"
-        
+
         # -------------------------------------------------------------------------
         # 1. ACTION CIBLÉE (CORRECTION: REVERSAL)
         # -------------------------------------------------------------------------
         is_boom = "BOOM" in symbol.upper()
         # Vendre Boom / Acheter Crash
-        target_action = "SELL" if is_boom else "BUY" 
-        target_direction = "BEARISH" if is_boom else "BULLISH" 
+        target_action = "SELL" if is_boom else "BUY"
+        target_direction = "BEARISH" if is_boom else "BULLISH"
+        direction = target_direction  # initialisé ici, réassigné si score >= 55
         
         # Données de base pour le calcul du risque
         atr_m5_series = self.calculate_atr(df_m5, 14) 
