@@ -392,6 +392,16 @@ class DTEEngine:
                     sig_dict['action'] = 'WAIT'
                     logger.info(f'[LLM] Signal {symbol} annulé: {llm_advice.get("reason")}')
 
+            # Données de marché pour la projection chartographique (extension Chrome)
+            if len(m1) > 14:
+                hi = m1['high'].values; lo = m1['low'].values; cl = m1['close'].values
+                tr = [max(float(hi[i]-lo[i]), abs(float(hi[i]-cl[i-1])), abs(float(lo[i]-cl[i-1])))
+                      for i in range(1, 15)]
+                sig_dict['atr_price']     = round(sum(tr) / len(tr), 8)
+                sig_dict['current_price'] = float(cl[-1])
+            mt5_sym = SYMBOL_MAP.get(symbol, symbol)
+            sig_dict['point_size'] = float(self.provider._specs.get(mt5_sym, {}).get('point', 0.01))
+
             # Log condensé — couleurs via _ColorFmt (▲=vert, ▼=rouge, —=gris)
             action = sig_dict['action']
             score  = sig_dict['score']
