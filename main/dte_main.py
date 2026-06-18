@@ -107,6 +107,8 @@ MANAGE_INTERVAL   = 10   # gestion trailing/BE toutes les 10s
 BE_TRIGGER              = 0.5  # déclenche BE quand profit ≥ 50% du SL structurel initial
 TRAIL_TRIGGER           = 1.0  # déclenche trailing quand profit ≥ 100% du SL structurel initial
 TRAIL_DISTANCE          = 0.5  # trail à 50% du SL structurel depuis le cours courant
+PARTIAL_TRIGGER         = 1.5  # prise de partiel quand profit ≥ 150% du SL (RR 1.5)
+PARTIAL_PCT             = 0.5  # ferme 50% du volume initial au partiel
 MAX_POSITIONS_PER_SYMBOL = 2   # pyramiding autorisé jusqu'à N positions simultanées par symbole
 
 # ── État global partagé avec l'API ────────────────────────────────────────────
@@ -183,8 +185,9 @@ class DTEEngine:
         self._last_summary  = 0.0   # timestamp du dernier résumé console
         self._last_manage   = 0.0   # timestamp de la dernière gestion des positions
         # Mémorise la distance SL structurelle ORIGINALE par ticket (avant auto-expansion et BE)
-        # Utilisée pour que les triggers BE/trailing restent calibrés sur le SL initial
+        # Utilisée pour que les triggers BE/trailing/partiel restent calibrés sur le SL initial
         self._pos_init_sl: dict = {}
+        self._pos_partial_done: set = set()  # tickets ayant déjà eu leur prise de partiel
 
     def _open_log_window(self):
         """Ouvre un second terminal PowerShell qui suit le fichier de logs en temps réel."""
@@ -326,6 +329,7 @@ class DTEEngine:
         for t in list(self._pos_init_sl.keys()):
             if t not in open_tickets:
                 del self._pos_init_sl[t]
+        self._pos_partial_done -= (self._pos_partial_done - open_tickets)
 
         for pos in positions:
             ticket  = pos.get('ticket')
@@ -347,6 +351,37 @@ class DTEEngine:
                 ref_sl_dist = sl_dist_mt5
 
             profit_dist = (current - entry) if is_buy else (entry - current)
+
+            # ── Partial Take Profit ───────────────────────────────────────────
+            if ticket not in self._pos_partial_done and profit_dist >= ref_sl_dist * PARTIAL_TRIGGER:
+                full_vol    = pos.get('volume', 0.0)
+                mt5_sym     = pos.get('symbol', '')
+                specs       = self.provider._specs.get(mt5_sym, {})
+                vol_min     = specs.get('volume_min', 0.01)
+                partial_vol = round(full_vol * PARTIAL_PCT, 2)
+                remain_vol  = round(full_vol - partial_vol, 2)
+                if partial_vol >= vol_min and remain_vol >= vol_min:
+                    res = self.provider.close_partial(ticket, partial_vol)
+                    if res.get('success'):
+                        self._pos_partial_done.add(ticket)
+                        logger.info(
+                            f'[PARTIAL] #{ticket} {pos["symbol"]} — {partial_vol:.2f}L clôturés '
+                            f'({PARTIAL_PCT*100:.0f}%) | RR={PARTIAL_TRIGGER} | '
+                            f'profit:{profit_dist:.4f} ≥ {ref_sl_dist*PARTIAL_TRIGGER:.4f}'
+                        )
+                        summary.info(
+                            f'  [PARTIAL TP] #{ticket} {pos["symbol"]} — '
+                            f'{partial_vol:.2f}L @ RR{PARTIAL_TRIGGER}'
+                        )
+                        # Forcer BE immédiatement après le partiel si SL encore sous l'entrée
+                        buffer   = ref_sl_dist * 0.02
+                        be_sl    = round((entry + buffer) if is_buy else (entry - buffer), 5)
+                        needs_be = (is_buy and sl < be_sl - 1e-6) or (not is_buy and sl > be_sl + 1e-6)
+                        if needs_be:
+                            if self.provider.modify_position_sl(ticket, be_sl, tp):
+                                logger.info(f'[PARTIAL→BE] #{ticket} SL forcé à {be_sl:.5f}')
+                    else:
+                        logger.warning(f'[PARTIAL] #{ticket} échec: {res.get("error")}')
 
             # ── Breakeven ─────────────────────────────────────────────────────
             if profit_dist >= ref_sl_dist * BE_TRIGGER:

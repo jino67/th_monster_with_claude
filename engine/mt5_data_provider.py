@@ -441,6 +441,45 @@ class MT5DataProvider:
             return {'success': True, 'ticket': ticket, 'profit': pos.profit}
         return {'success': False, 'error': result.comment if result else 'Erreur inconnue'}
 
+    def close_partial(self, ticket: int, volume: float) -> dict:
+        """Clôture partiellement une position (ferme `volume` lots)."""
+        if not self.ensure_connected():
+            return {'success': False, 'error': 'MT5 non connecté'}
+
+        positions = mt5.positions_get(ticket=ticket)
+        if not positions:
+            return {'success': False, 'error': f'Position {ticket} introuvable'}
+
+        pos = positions[0]
+        specs   = self._specs.get(pos.symbol, {})
+        vol_min = specs.get('volume_min', 0.01)
+        vol     = round(max(vol_min, min(volume, pos.volume - vol_min)), 2)
+
+        tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            return {'success': False, 'error': 'Tick indisponible'}
+
+        order_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        price      = tick.bid if pos.type == mt5.POSITION_TYPE_BUY else tick.ask
+
+        request = {
+            'action':       mt5.TRADE_ACTION_DEAL,
+            'symbol':       pos.symbol,
+            'volume':       vol,
+            'type':         order_type,
+            'position':     ticket,
+            'price':        price,
+            'deviation':    20,
+            'magic':        MAGIC_NUMBER,
+            'comment':      f'Partial #{ticket}',
+            'type_time':    mt5.ORDER_TIME_GTC,
+            'type_filling': mt5.ORDER_FILLING_FOK,
+        }
+        result = mt5.order_send(request)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return {'success': True, 'ticket': ticket, 'volume_closed': vol}
+        return {'success': False, 'error': result.comment if result else 'Erreur inconnue'}
+
     def get_open_positions(self, symbol: str = None) -> list:
         """Retourne les positions ouvertes du système DTE (magic number)."""
         if not self.ensure_connected():
