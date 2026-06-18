@@ -2,6 +2,10 @@
 Modèle C — Event Detector (Spike/Range Break)
 Détecte les spikes sur Crash/Boom via analyse de prix MT5
 Loi exponentielle calibrée sur données réelles (Bible v1.0 Section 6.3)
+
+Amélioration v2 : le compteur de ticks accepte un vrai décompte MT5
+(mt5_data_provider.count_ticks_since_last_spike) en lieu et place du fallback
+bougie×200 qui saturait le compteur en quelques secondes.
 """
 import math
 import pandas as pd
@@ -60,23 +64,40 @@ class EventDetector:
         body = last['close'] - last['open']
         threshold = self.stats['threshold_pts']
         direction = self.stats['direction']
-        # Spike CRASH = grand range + body négatif
         if direction == -1:
             return candle_range > avg_range * 3 and body < -threshold
-        # Spike BOOM = grand range + body positif
         return candle_range > avg_range * 3 and body > threshold
 
-    def update_from_candles(self, m1: pd.DataFrame) -> dict:
-        """Met à jour le compteur de ticks et retourne l'état courant."""
+    def update_from_candles(
+        self,
+        m1: pd.DataFrame,
+        real_tick_count: Optional[int] = None,
+    ) -> dict:
+        """
+        Met à jour le compteur et retourne l'état courant.
+
+        real_tick_count : si fourni (≥ 0), on l'utilise directement comme
+        nombre de ticks depuis le dernier spike (données MT5 réelles).
+        Sinon fallback sur un équivalent bougies (imprécis mais fonctionnel
+        pour les actifs sans tracking spike).
+        """
         spike_detected = self.detect_spike_from_candles(m1)
-        ticks_equiv = max(1, len(m1)) if m1 is not None else 1
-        self.ticks_since_last_spike += ticks_equiv
-        if spike_detected:
-            self.spike_count_session += 1
-            if m1 is not None and len(m1) > 0:
-                last = m1.iloc[-1]
-                self.last_spike_amplitude = last['high'] - last['low']
-            self.ticks_since_last_spike = 0
+
+        if real_tick_count is not None and real_tick_count >= 0:
+            # Mode ticks réels — le compteur MT5 inclut déjà la détection du dernier spike
+            self.ticks_since_last_spike = real_tick_count
+            if spike_detected:
+                self.spike_count_session += 1
+        else:
+            # Fallback bougies — imprécis, utilisé uniquement sur actifs sans spike tracking
+            ticks_equiv = max(1, len(m1)) if m1 is not None else 1
+            self.ticks_since_last_spike += ticks_equiv
+            if spike_detected:
+                self.spike_count_session += 1
+                self.ticks_since_last_spike = 0
+
+        if spike_detected and m1 is not None and len(m1) > 0:
+            self.last_spike_amplitude = float(m1.iloc[-1]['high'] - m1.iloc[-1]['low'])
 
         prob = self.cumulative_spike_probability(self.ticks_since_last_spike)
         return self._build_result(spike_detected, prob)
@@ -91,8 +112,6 @@ class EventDetector:
         else:
             alert = 'FAIBLE'
 
-        # Score = imminence du prochain événement pour les Crash/Boom
-        # Pour les autres actifs, score neutre = 50
         score = min(90.0, prob) if self._has_spike_tracking else 50.0
 
         return {
@@ -105,6 +124,12 @@ class EventDetector:
             'has_spike_tracking': self._has_spike_tracking,
         }
 
-    def compute(self, m1: pd.DataFrame, m5: pd.DataFrame = None, m15: pd.DataFrame = None) -> dict:
+    def compute(
+        self,
+        m1: pd.DataFrame,
+        m5: pd.DataFrame = None,
+        m15: pd.DataFrame = None,
+        real_tick_count: Optional[int] = None,
+    ) -> dict:
         """Point d'entrée principal du modèle C."""
-        return self.update_from_candles(m1)
+        return self.update_from_candles(m1, real_tick_count=real_tick_count)

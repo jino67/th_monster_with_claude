@@ -207,6 +207,42 @@ class MT5DataProvider:
         m15 = self.get_candles(symbol, 'M15', count_m15)
         return m1, m5, m15
 
+    def count_ticks_since_last_spike(
+        self,
+        symbol: str,
+        spike_threshold: float,
+        spike_direction: int,
+        lookback_minutes: int = 30,
+    ) -> int:
+        """
+        Retourne le nombre de vrais ticks MT5 écoulés depuis le dernier spike
+        détecté sur Boom/Crash.  Retourne -1 si indisponible.
+
+        spike_direction : +1 (Boom, saut UP) ou -1 (Crash, saut DOWN)
+        spike_threshold : saut de prix minimum pour valider un spike (en points price)
+        """
+        if not self.ensure_connected():
+            return -1
+        mt5_sym = SYMBOL_MAP.get(symbol, symbol)
+        from datetime import datetime as _dt, timedelta, timezone
+        now    = _dt.now(timezone.utc)
+        from_dt = now - timedelta(minutes=lookback_minutes)
+        ticks = mt5.copy_ticks_range(mt5_sym, from_dt, now, mt5.COPY_TICKS_ALL)
+        if ticks is None or len(ticks) == 0:
+            return -1
+
+        bids = ticks['bid']
+        n = len(bids)
+        # Parcourir en remontant pour trouver le spike le plus récent
+        for i in range(n - 1, 0, -1):
+            delta = float(bids[i]) - float(bids[i - 1])
+            if spike_direction == -1 and delta < -spike_threshold:   # Crash ↓
+                return n - i
+            if spike_direction == 1  and delta >  spike_threshold:   # Boom ↑
+                return n - i
+        # Aucun spike dans la fenêtre → tout le buffer est "depuis le dernier spike"
+        return n
+
     def get_current_price(self, symbol: str) -> Optional[Dict]:
         """Prix bid/ask courant depuis MT5."""
         if not self.ensure_connected():

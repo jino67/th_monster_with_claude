@@ -419,12 +419,30 @@ class DTEEngine:
             # H1 pour le Modèle E (Legacy Price Action) — optionnel
             h1 = self.provider.get_candles(symbol, 'H1', count=60)
 
+            # Vrais ticks MT5 pour le compteur spike (Boom/Crash uniquement)
+            # Remplace le faux compteur len(m1)×cycle qui saturait en ~8 secondes
+            real_tick_counts = {}
+            if symbol in SPIKE_ONLY_SYMBOLS:
+                from engine.event_detector import SPIKE_STATS
+                stats = SPIKE_STATS.get(symbol, {})
+                if stats:
+                    real_tc = self.provider.count_ticks_since_last_spike(
+                        symbol,
+                        spike_threshold=stats['threshold_pts'],
+                        spike_direction=stats['direction'],
+                    )
+                    if real_tc >= 0:
+                        real_tick_counts[symbol] = real_tc
+
             # Calcul signal composite (5 modèles)
-            signal = self.fusions[symbol].compute(m1, m5, m15, h1=h1)
+            signal = self.fusions[symbol].compute(
+                m1, m5, m15, h1=h1, real_tick_counts=real_tick_counts
+            )
             sig_dict = self.fusions[symbol].to_dict(signal)
 
-            # Optionnel : enrichissement LLM si score borderline
-            if self.llm and is_active and 40 <= signal.score <= 65:
+            # LLM — désactivé pour Boom/Crash (décision purement spike, pas composite)
+            # et uniquement pour le symbole actif sur zone borderline
+            if self.llm and is_active and symbol not in SPIKE_ONLY_SYMBOLS and 40 <= signal.score <= 65:
                 acc = _state.get('account', {})
                 llm_advice = self.llm.advise(sig_dict, account_balance=acc.get('balance', 0))
                 sig_dict['llm'] = llm_advice

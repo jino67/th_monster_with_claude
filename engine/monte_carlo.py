@@ -1,66 +1,109 @@
 """
-Modèle D — Monte Carlo Engine
-Simule la distribution des prochains résultats basée sur les stats observées
-Score de confiance probabiliste pour le signal composite
+Modèle D — Momentum Engine (remplace le Monte Carlo bruité)
+
+Ancienne version : simulait 1000 séquences depuis le win_rate empirique des
+20 dernières bougies. Sur RNG (win_rate ≈ 50%) → score toujours ~50 = bruit pur.
+
+Nouvelle version : score de momentum multi-timeframe basé sur les EMA.
+- EMA(9) vs EMA(21) : croisement directionnel par timeframe
+- Pente EMA(9) sur 3 bougies : accélération du momentum
+- Alignement M1/M5/M15 : bonus si les 3 timeframes sont en accord
+- Résultat [0-100] avec direction exploitable
+
+Cela fournit un vrai signal additionnel pour les Volatility indices (où les
+streaks du modèle A sont proches de 50%) et un contexte de tendance cohérent
+pour les autres actifs.
 """
+from __future__ import annotations
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple
+from typing import Dict, Optional
 
 
 class MonteCarloEngine:
-    """Modèle D — Simulations Monte Carlo sur les statistiques de l'actif."""
+    """
+    Modèle D — Momentum multi-timeframe (EMA9/EMA21).
+    Conserve le nom MonteCarloEngine pour compatibilité avec signal_fusion.py.
+    """
 
-    def __init__(self, symbol: str, n_simulations: int = 1000):
+    def __init__(self, symbol: str, n_simulations: int = 500):
         self.symbol = symbol
-        self.n_simulations = n_simulations
+        # n_simulations conservé pour compatibilité mais non utilisé
 
-    def _compute_empirical_stats(self, candles: pd.DataFrame) -> Dict:
-        """Calcule les statistiques empiriques sur les bougies récentes."""
-        if candles is None or len(candles) < 20:
-            return {'win_rate': 0.50, 'avg_up': 1.0, 'avg_down': 1.0}
-        bodies = candles['close'] - candles['open']
-        ups = bodies[bodies > 0]
-        downs = bodies[bodies < 0]
-        win_rate = len(ups) / max(1, len(ups) + len(downs))
-        avg_up = float(ups.mean()) if len(ups) > 0 else 0.001
-        avg_down = float(abs(downs.mean())) if len(downs) > 0 else 0.001
-        return {'win_rate': win_rate, 'avg_up': avg_up, 'avg_down': avg_down}
-
-    def simulate(self, candles: pd.DataFrame, horizon: int = 10) -> dict:
+    def _score_timeframe(self, df: Optional[pd.DataFrame]) -> tuple[float, int]:
         """
-        Simule `n_simulations` séquences de `horizon` bougies.
-        Retourne la probabilité que le bilan soit positif sur cet horizon.
+        Score [-100, +100] et direction pour un timeframe.
+        Retourne (0, 0) si données insuffisantes.
         """
-        stats = self._compute_empirical_stats(candles)
-        win_rate = stats['win_rate']
-        avg_up = stats['avg_up']
-        avg_down = stats['avg_down']
+        if df is None or len(df) < 22:
+            return 0.0, 0
 
-        rng = np.random.default_rng(seed=None)
-        outcomes = rng.random((self.n_simulations, horizon))
-        pnl_matrix = np.where(outcomes < win_rate, avg_up, -avg_down)
-        session_pnl = pnl_matrix.sum(axis=1)
+        close = df['close']
+        ema9  = close.ewm(span=9,  adjust=False).mean()
+        ema21 = close.ewm(span=21, adjust=False).mean()
 
-        prob_positive = float((session_pnl > 0).mean()) * 100.0
-        expected_value = float(session_pnl.mean())
-        confidence_interval = (
-            float(np.percentile(session_pnl, 5)),
-            float(np.percentile(session_pnl, 95)),
-        )
+        e9   = float(ema9.iloc[-1])
+        e21  = float(ema21.iloc[-1])
+        direction = 1 if e9 > e21 else (-1 if e9 < e21 else 0)
 
-        # Score [0-100] : probabilité d'être positif sur l'horizon
-        score = min(100.0, max(0.0, prob_positive))
+        # Force = écart EMA9/EMA21 normalisé par ATR14
+        atr = float((df['high'] - df['low']).tail(14).mean())
+        if atr < 1e-10:
+            return float(direction) * 30.0, direction
+
+        gap      = abs(e9 - e21)
+        strength = min(1.0, gap / atr)
+
+        # Pente EMA9 : la tendance s'accélère-t-elle dans la bonne direction ?
+        if len(ema9) >= 4:
+            slope = float(ema9.iloc[-1] - ema9.iloc[-4])
+            slope_aligned = (slope > 0 and direction == 1) or (slope < 0 and direction == -1)
+        else:
+            slope_aligned = True
+
+        raw = direction * strength * (1.25 if slope_aligned else 0.75) * 100.0
+        return max(-100.0, min(100.0, raw)), direction
+
+    def compute(
+        self,
+        m1:  Optional[pd.DataFrame],
+        m5:  Optional[pd.DataFrame] = None,
+        m15: Optional[pd.DataFrame] = None,
+    ) -> dict:
+        """Score du modèle D [0-100] + direction dominante."""
+        weights = {'M1': 0.50, 'M5': 0.35, 'M15': 0.15}
+        composite = 0.0
+        dirs = []
+
+        for tf, df, w in [('M1', m1, 0.50), ('M5', m5, 0.35), ('M15', m15, 0.15)]:
+            s, d = self._score_timeframe(df)
+            composite += s * w
+            dirs.append(d)
+
+        # Bonus si les 3 timeframes sont alignés dans la même direction
+        non_zero = [d for d in dirs if d != 0]
+        if len(non_zero) >= 2 and len(set(non_zero)) == 1:
+            composite *= 1.25
+
+        score = round(min(100.0, max(0.0, 50.0 + composite / 2.0)), 1)
+        dominant = 1 if composite > 5 else (-1 if composite < -5 else 0)
 
         return {
-            'score': round(score, 1),
-            'prob_positive_pct': round(prob_positive, 1),
-            'expected_value': round(expected_value, 4),
-            'ci_5_95': (round(confidence_interval[0], 4), round(confidence_interval[1], 4)),
-            'win_rate_empirical': round(win_rate * 100, 1),
-            'horizon': horizon,
+            'score':      score,
+            'composite':  round(composite, 1),
+            'direction':  dominant,
+            'tf_dirs':    dirs,
         }
 
-    def compute(self, m1: pd.DataFrame, m5: pd.DataFrame = None, m15: pd.DataFrame = None) -> dict:
-        """Point d'entrée principal du modèle D."""
-        return self.simulate(m1, horizon=10)
+    # ── Rétrocompatibilité ────────────────────────────────────────────────────
+    def simulate(self, candles: pd.DataFrame, horizon: int = 10) -> dict:
+        """Alias legacy — redirige vers compute()."""
+        result = self.compute(candles)
+        return {
+            'score':                result['score'],
+            'prob_positive_pct':    result['score'],
+            'expected_value':       0.0,
+            'ci_5_95':              (0.0, 0.0),
+            'win_rate_empirical':   50.0,
+            'horizon':              horizon,
+        }

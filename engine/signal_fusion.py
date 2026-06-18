@@ -65,11 +65,13 @@ class SignalFusion:
         m5: pd.DataFrame,
         m15: pd.DataFrame,
         h1: pd.DataFrame = None,
+        real_tick_counts: dict = None,
     ) -> CompositeSignal:
         # ── Calcul des 4 modèles stat ─────────────────────────────────────────
+        real_tc = (real_tick_counts or {}).get(self.symbol)
         res_a = self.model_a.compute(m1, m5, m15)
         res_b = self.model_b.compute(m1, m5, m15)
-        res_c = self.model_c.compute(m1, m5, m15)
+        res_c = self.model_c.compute(m1, m5, m15, real_tick_count=real_tc)
         res_d = self.model_d.compute(m1, m5, m15)
 
         sa = res_a['score']
