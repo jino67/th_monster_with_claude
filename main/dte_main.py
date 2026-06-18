@@ -111,6 +111,12 @@ PARTIAL_TRIGGER         = 1.5  # prise de partiel quand profit ≥ 150% du SL (R
 PARTIAL_PCT             = 0.5  # ferme 50% du volume initial au partiel
 MAX_POSITIONS_PER_SYMBOL = 2   # pyramiding autorisé jusqu'à N positions simultanées par symbole
 
+# Symboles où on ignore le signal composite — entrée uniquement sur imminence de spike
+SPIKE_ONLY_SYMBOLS = frozenset({
+    'Crash 500 Index', 'Crash 1000 Index',
+    'Boom 500 Index',  'Boom 1000 Index',
+})
+
 # ── État global partagé avec l'API ────────────────────────────────────────────
 _state = {
     'running': True,
@@ -452,18 +458,46 @@ class DTEEngine:
             if sig_dict.get('spike_alert') and spike_lvl in ('HAUTE', 'CRITIQUE'):
                 add_alert(f'SPIKE {spike_lvl} sur {symbol}', level='WARN')
 
-            # Exécution — tous les symboles sont tradables en FULL_AUTO
-            # LLM restreint au symbole actif (contrôle du coût API)
-            if action != 'WAIT' and self.mode == 'FULL_AUTO':
-                self._execute_trade(symbol, sig_dict, m1, m5)
-            elif action != 'WAIT' and self.mode == 'SEMI_AUTO':
-                logger.info(f'[SEMI_AUTO] Signal {action} sur {symbol}. Confirmez dans le popup.')
+            # Exécution
+            if symbol in SPIKE_ONLY_SYMBOLS:
+                # Boom/Crash : on ne trade PAS les briques — uniquement les spikes imminents.
+                # La direction est imposée par l'actif (Crash→SELL, Boom→BUY), indépendamment
+                # du signal composite (qui serait pollué par les 90% de briques UP/DOWN).
+                spike_lvl           = sig_dict.get('spike_alert_level', '')
+                spike_just_happened = sig_dict.get('spike_alert', False)
+                if not spike_just_happened and spike_lvl in ('HAUTE', 'CRITIQUE'):
+                    if self.mode == 'FULL_AUTO':
+                        self._execute_trade(symbol, self._build_spike_sig(symbol, sig_dict), m1, m5)
+                    elif self.mode == 'SEMI_AUTO':
+                        logger.info(f'[SEMI_AUTO] Spike {spike_lvl} imminent sur {symbol}. Confirmez.')
+            else:
+                if action != 'WAIT' and self.mode == 'FULL_AUTO':
+                    self._execute_trade(symbol, sig_dict, m1, m5)
+                elif action != 'WAIT' and self.mode == 'SEMI_AUTO':
+                    logger.info(f'[SEMI_AUTO] Signal {action} sur {symbol}. Confirmez dans le popup.')
 
             return sig_dict
 
         except Exception as e:
             logger.error(f'Erreur _process_symbol({symbol}): {e}', exc_info=True)
             return None
+
+    def _build_spike_sig(self, symbol: str, sig_dict: dict) -> dict:
+        """Construit un sig_dict orienté spike pour Boom/Crash.
+
+        Direction imposée par la nature de l'actif (Crash→SELL, Boom→BUY).
+        Score = score_C (probabilité spike) pour un sizing calibré sur la confiance réelle.
+        spike_alert=True → compute_sl_tp utilise min_rr=1.2 (trade court, spike rapide).
+        """
+        from engine.event_detector import SPIKE_STATS
+        spike_dir  = SPIKE_STATS.get(symbol, {}).get('direction', 0)
+        spike_score = sig_dict.get('scores', {}).get('C', 60.0)
+        d = dict(sig_dict)
+        d['direction']   = spike_dir
+        d['action']      = 'BUY' if spike_dir > 0 else 'SELL'
+        d['spike_alert'] = True    # → min_rr = 1.2 dans compute_sl_tp
+        d['score']       = spike_score
+        return d
 
     def _execute_trade(self, symbol: str, sig_dict: dict, m1, m5=None):
         """Exécution d'un trade — FULL_AUTO uniquement."""
