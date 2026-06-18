@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = logging.getLogger('dte.api')
 
@@ -32,6 +33,19 @@ app.add_middleware(
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+class _PrivateNetworkMiddleware(BaseHTTPMiddleware):
+    """Chrome Private Network Access (PNA) — requis depuis Chrome 98+.
+    Les sites publics (deriv.com) ne peuvent appeler localhost que si le serveur
+    répond Access-Control-Allow-Private-Network: true sur le preflight OPTIONS."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers['Access-Control-Allow-Private-Network'] = 'true'
+        return response
+
+
+app.add_middleware(_PrivateNetworkMiddleware)
 
 
 def _sanitize(obj):
