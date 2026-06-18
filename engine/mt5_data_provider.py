@@ -287,7 +287,7 @@ class MT5DataProvider:
 
         vol = max(vol_min, min(vol_max, vol))
         if vol_step > 0:
-            vol = round(round(vol / vol_step) * vol_step, 8)
+            vol = round(round(vol / vol_step) * vol_step, 2)
         # Re-clamp après arrondi step
         vol = max(vol_min, min(vol_max, vol))
         return vol
@@ -332,6 +332,9 @@ class MT5DataProvider:
             if tp_pips > 0:
                 tp = price + tp_pips * point if direction == 'BUY' else price - tp_pips * point
 
+        digits = sym_info.digits
+        sp     = self._specs.get(mt5_sym, {})
+
         request = {
             'action':       mt5.TRADE_ACTION_DEAL,
             'symbol':       mt5_sym,
@@ -347,6 +350,44 @@ class MT5DataProvider:
             'type_filling': mt5.ORDER_FILLING_FOK,
         }
 
+        # Validation pré-envoi avec auto-ajustement (jusqu'à 3 tentatives)
+        if sl > 0 and tp > 0:
+            for attempt in range(4):
+                chk = mt5.order_check(request)
+                if chk is None or chk.retcode == 0:
+                    break
+                rc  = chk.retcode
+                cmt = (chk.comment or '').lower()
+                logger.debug(f'order_check [{mt5_sym}] attempt={attempt}: rc={rc} "{chk.comment}"')
+                if rc == 10016 or 'stop' in cmt:
+                    # Invalid stops → élargir SL et TP ×1.5 par tentative
+                    factor = 1.5 ** (attempt + 1)
+                    sl_d   = abs(request['sl'] - request['price'])
+                    tp_d   = abs(request['tp'] - request['price'])
+                    if direction == 'BUY':
+                        request['sl'] = round(request['price'] - sl_d * factor, digits)
+                        request['tp'] = round(request['price'] + tp_d * factor, digits)
+                    else:
+                        request['sl'] = round(request['price'] + sl_d * factor, digits)
+                        request['tp'] = round(request['price'] - tp_d * factor, digits)
+                    logger.debug(f'SL/TP élargi ×{factor:.2f}: SL={request["sl"]} TP={request["tp"]}')
+                elif rc == 10014 or 'volume' in cmt:
+                    # Invalid volume → réduire de 50%
+                    vol_min  = sp.get('vol_min',  0.01)
+                    vol_step = sp.get('vol_step', 0.01)
+                    new_vol  = max(vol_min, request['volume'] * 0.5)
+                    new_vol  = max(vol_min, round(round(new_vol / vol_step) * vol_step, 2))
+                    if abs(new_vol - request['volume']) < 1e-10:
+                        break
+                    request['volume'] = new_vol
+                    logger.debug(f'Volume réduit: {request["volume"]}')
+                else:
+                    break  # erreur non récupérable via ajustement automatique
+
+        # Mettre à jour sl/tp depuis le request (éventuellement ajustés)
+        sl = request['sl']
+        tp = request['tp']
+
         result = mt5.order_send(request)
         if result is None:
             return {'success': False, 'error': f'order_send None: {mt5.last_error()}'}
@@ -358,7 +399,7 @@ class MT5DataProvider:
             'ticket': result.order,
             'symbol': mt5_sym,
             'direction': direction,
-            'volume': volume,
+            'volume': request['volume'],
             'price': result.price,
             'sl': sl,
             'tp': tp,

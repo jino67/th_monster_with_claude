@@ -475,18 +475,21 @@ class DTEEngine:
         )
 
         if result.get('success'):
-            msg = (f'TRADE {action_str} {symbol} | Vol:{volume} | Prix:{result["price"]:.4f} '
-                   f'| SL:{sl_price:.4f} TP:{tp_price:.4f} RR:{rr} ATR:{atr_p:.1f}p '
+            actual_sl  = result.get('sl', sl_price)
+            actual_tp  = result.get('tp', tp_price)
+            actual_vol = result.get('volume', volume)
+            msg = (f'TRADE {action_str} {symbol} | Vol:{actual_vol:.2f} | Prix:{result["price"]:.4f} '
+                   f'| SL:{actual_sl:.4f} TP:{actual_tp:.4f} RR:{rr} ATR:{atr_p:.1f}p '
                    f'| Score:{score}{" [REDUIT]" if reduce_size else ""}')
             logger.info(msg)
-            summary.info(f'{_G}TRADE{_RS} {action_str} {symbol} | Vol:{volume} | RR:{rr} | Score:{score}')
+            summary.info(f'{_G}TRADE{_RS} {action_str} {symbol} | Vol:{actual_vol:.2f} | RR:{rr} | Score:{score}')
             add_alert(msg, level='TRADE')
             _state['session_stats']['trades'] += 1
         else:
             err = result.get("error", "?")
             logger.error(f'Ordre refuse: {err} | {symbol} {action_str} SL={sl_price:.4f} TP={tp_price:.4f}')
             add_alert(f'Ordre refuse: {err}', level='ERROR')
-            self._order_cooldown.pop(symbol, None)
+            # On conserve le cooldown 30s même en cas d'échec pour éviter le spam
 
     def _try_notify_api(self):
         """Tente de mettre à jour le state dans l'API FastAPI si elle tourne."""

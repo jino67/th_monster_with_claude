@@ -900,6 +900,21 @@ La connexion est vérifiée avant chaque opération (`ensure_connected()`). En c
 
 > **Note** : `ORDER_FILLING_IOC` (Immediate or Cancel) n'est **pas supporté** par Deriv Demo sur les indices synthétiques. `ORDER_FILLING_FOK` est le mode correct.
 
+### Validation pré-envoi — Auto-ajustement SL/TP et volume
+
+Avant tout `order_send`, `place_order` exécute `mt5.order_check()` en boucle (max 3 tentatives) :
+
+| Retcode `order_check` | Commentaire | Action |
+|---|---|---|
+| `0` | Valide | Envoi immédiat |
+| `10016` `"stop"` | Invalid stops | SL/TP élargis ×1.5 par tentative |
+| `10014` `"volume"` | Invalid volume | Volume réduit ×0.5 |
+| Autre | Non récupérable | Abandon, cooldown 30s maintenu |
+
+- Le ratio SL/TP et donc le RR restent constants puisque les deux distances sont multipliées par le même facteur.
+- Si 3 expansions ne suffisent pas, `order_send` est quand même tenté — il échouera et le cooldown 30s restera actif (pas de spam).
+- Le cooldown 30s est **toujours conservé**, même en cas d'échec, pour éviter la répétition d'erreurs structurelles toutes les 2 secondes.
+
 ### Modification de position — Trailing Stop et Breakeven
 
 ```python
