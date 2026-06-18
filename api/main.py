@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from typing import Optional, Dict, Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -27,10 +28,27 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['*'],
-    allow_credentials=True,
+    allow_credentials=False,   # True + '*' = invalide CORS spec, navigateur bloque
     allow_methods=['*'],
     allow_headers=['*'],
 )
+
+
+def _sanitize(obj):
+    """Convertit récursivement les types numpy en types Python natifs (numpy.bool_ cause ValueError dans jsonable_encoder)."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(v) for v in obj]
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
 
 # ── État partagé (mis à jour par dte_main.py via set_state) ──────────────────
 _system_state: Dict[str, Any] = {
@@ -167,7 +185,7 @@ async def emergency_stop():
 @app.get('/api/full_state')
 async def get_full_state():
     """Dump complet de l'état — pour l'extension Chrome."""
-    return _system_state
+    return JSONResponse(content=_sanitize(_system_state))
 
 
 # ── WebSocket pour push temps réel ───────────────────────────────────────────
@@ -185,9 +203,10 @@ async def websocket_endpoint(ws: WebSocket):
 async def broadcast_state():
     """Appelé par dte_main.py pour pusher l'état aux clients WS."""
     dead = []
+    safe = _sanitize(_system_state)
     for ws in _websocket_clients:
         try:
-            await ws.send_json(_system_state)
+            await ws.send_json(safe)
         except Exception:
             dead.append(ws)
     for ws in dead:
