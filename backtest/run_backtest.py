@@ -80,28 +80,37 @@ def _connect_mt5() -> bool:
         print('ERROR: MetaTrader5 non installé (pip install MetaTrader5)')
         return False
     if not mt5.initialize():
-        print(f'ERROR: mt5.initialize() failed: {mt5.last_error()}')
+        print(f'ERROR: mt5.initialize() échoué: {mt5.last_error()}')
         return False
     login = int(os.getenv('MT5_ACCOUNT_NUMBER', '0'))
     pwd   = os.getenv('MT5_PASSWORD', '')
     srv   = os.getenv('MT5_SERVER', 'DerivSVG-Server')
     if login and pwd:
         if not mt5.login(login, pwd, srv):
-            print(f'ERROR: mt5.login() failed: {mt5.last_error()}')
+            print(f'ERROR: mt5.login() échoué: {mt5.last_error()}')
             mt5.shutdown()
             return False
+    info = mt5.account_info()
+    if info:
+        print(f'  MT5 connecté | Login:{info.login} | Solde:{info.balance} {info.currency} | Serveur:{info.server}')
+    else:
+        print(f'  WARN: mt5.account_info() None — terminal peut-être non connecté au broker')
     return True
 
 
 def _download_m1(symbol: str, months: int) -> Optional[pd.DataFrame]:
+    """Utilise copy_rates_from_pos (position-based) — évite les problèmes de
+    timezone avec copy_rates_range sur certaines versions du terminal MT5."""
     import MetaTrader5 as mt5
     mt5_sym = SYMBOL_MAP_MT5.get(symbol, symbol)
-    mt5.symbol_select(mt5_sym, True)
-    now     = datetime.now(timezone.utc)
-    from_dt = now - timedelta(days=months * 31)
-    rates = mt5.copy_rates_range(mt5_sym, mt5.TIMEFRAME_M1, from_dt, now)
+    if not mt5.symbol_select(mt5_sym, True):
+        print(f'  WARN: symbol_select({mt5_sym}) échoué: {mt5.last_error()}')
+        return None
+    # 6 mois × 31 jours × 24h × 60min — synthétiques Deriv 24/7
+    count = months * 31 * 24 * 60
+    rates = mt5.copy_rates_from_pos(mt5_sym, mt5.TIMEFRAME_M1, 0, count)
     if rates is None or len(rates) == 0:
-        print(f'  WARN: pas de données M1 pour {symbol}')
+        print(f'  WARN: pas de données M1 pour {symbol} — {mt5.last_error()}')
         return None
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)

@@ -557,11 +557,18 @@ class DTEEngine:
         )
 
         if sizing.action != 'TRADE':
-            logger.warning(f'[MM] {sizing.action}: {sizing.reason}')
             if sizing.action == 'STOP_SESSION':
+                logger.error(f'[MM] STOP_SESSION: {sizing.reason}')
                 add_alert(f'SESSION STOPPEE: {sizing.reason}', level='CRITIQUE')
+                summary.info(f'  ⛔ SESSION STOP: {sizing.reason}')
                 self.mode = 'SIGNAL_ONLY'
                 _state['mode'] = 'SIGNAL_ONLY'
+            elif sizing.crisis_level >= 2:
+                # Pause / crise sévère — toujours afficher dans le summary
+                logger.warning(f'[MM-CRISE] {sizing.reason}')
+                summary.info(f'  ⚠  CRISE L{sizing.crisis_level}: {sizing.reason}')
+            else:
+                logger.info(f'[MM] WAIT: {sizing.reason}')
             return
 
         # ── Volume en lots, réduit si alignement faible ───────────────────────
@@ -605,11 +612,14 @@ class DTEEngine:
             ticket = result.get('ticket')
             if ticket and sl_price > 0 and actual_px > 0:
                 self._pos_init_sl[ticket] = abs(actual_px - sl_price)
+            crisis_tag = f' [CRISE L{sizing.crisis_level}]' if sizing.crisis_level > 0 else ''
             msg = (f'TRADE {action_str} {symbol} | Vol:{actual_vol:.2f} | Prix:{actual_px:.4f} '
                    f'| SL:{actual_sl:.4f} TP:{actual_tp:.4f} RR:{rr} ATR:{atr_p:.1f}p '
-                   f'| Score:{score}{" [REDUIT]" if reduce_size else ""}')
+                   f'| Score:{score} Risk:{sizing.risk_pct:.1f}%{crisis_tag}'
+                   f'{" [REDUIT]" if reduce_size else ""}')
             logger.info(msg)
-            summary.info(f'{_G}TRADE{_RS} {action_str} {symbol} | Vol:{actual_vol:.2f} | RR:{rr} | Score:{score}')
+            summary.info(f'{_G}TRADE{_RS} {action_str} {symbol} | Vol:{actual_vol:.2f} | '
+                         f'RR:{rr} | Score:{score} | Risk:{sizing.risk_pct:.1f}%{crisis_tag}')
             add_alert(msg, level='TRADE')
             _state['session_stats']['trades'] += 1
         else:
