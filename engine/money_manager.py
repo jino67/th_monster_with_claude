@@ -11,7 +11,7 @@ from typing import Literal, Optional
 logger = logging.getLogger('dte.money_manager')
 
 # ── Règles absolues (inchangeables) ──────────────────────────────────────────
-MAX_RISK_PER_TRADE   = 0.02   # 2% max du capital par trade
+MAX_RISK_PER_TRADE   = 0.03   # 3% max du capital par trade
 STOP_SESSION_PCT     = 0.10   # -10% → arrêt de session
 MAX_MARTINGALE_LVLS  = 5      # Max 5 doublements
 MIN_SCORE_TRADE      = 40.0   # Score minimum
@@ -57,15 +57,15 @@ class MoneyManager:
     def kelly_fraction(self, win_prob: float, rr_ratio: float = 1.0) -> float:
         """
         f* = (p*b - q) / b,  b = RR ratio,  fraction = f*/4
-        Borné entre 0.5% et 2%
+        Borné entre 1% et 3%
         """
         p = min(0.99, max(0.01, win_prob / 100.0))
         q = 1.0 - p
         b = max(0.1, rr_ratio)
         kelly_full = (p * b - q) / b
         if kelly_full <= 0:
-            return 0.005
-        return max(0.005, min(MAX_RISK_PER_TRADE, kelly_full / 4.0))
+            return 0.01
+        return max(0.01, min(MAX_RISK_PER_TRADE, kelly_full / 4.0))
 
     # ── Calcul de la mise ─────────────────────────────────────────────────────
     def get_position_size(

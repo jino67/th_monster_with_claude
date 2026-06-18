@@ -104,9 +104,10 @@ SUMMARY_INTERVAL  = 300  # résumé console toutes les 5 minutes
 MANAGE_INTERVAL   = 10   # gestion trailing/BE toutes les 10s
 
 # ── Paramètres trailing stop / breakeven ─────────────────────────────────────
-BE_TRIGGER        = 0.5  # déclenche BE quand profit ≥ 50% du SL initial
-TRAIL_TRIGGER     = 1.0  # déclenche trailing quand profit ≥ 100% du SL initial
-TRAIL_DISTANCE    = 0.5  # trail à 50% du SL initial depuis le cours courant
+BE_TRIGGER              = 0.5  # déclenche BE quand profit ≥ 50% du SL structurel initial
+TRAIL_TRIGGER           = 1.0  # déclenche trailing quand profit ≥ 100% du SL structurel initial
+TRAIL_DISTANCE          = 0.5  # trail à 50% du SL structurel depuis le cours courant
+MAX_POSITIONS_PER_SYMBOL = 2   # pyramiding autorisé jusqu'à N positions simultanées par symbole
 
 # ── État global partagé avec l'API ────────────────────────────────────────────
 _state = {
@@ -181,6 +182,9 @@ class DTEEngine:
         self._order_cooldown_sec = 30
         self._last_summary  = 0.0   # timestamp du dernier résumé console
         self._last_manage   = 0.0   # timestamp de la dernière gestion des positions
+        # Mémorise la distance SL structurelle ORIGINALE par ticket (avant auto-expansion et BE)
+        # Utilisée pour que les triggers BE/trailing restent calibrés sur le SL initial
+        self._pos_init_sl: dict = {}
 
     def _open_log_window(self):
         """Ouvre un second terminal PowerShell qui suit le fichier de logs en temps réel."""
@@ -224,7 +228,7 @@ class DTEEngine:
         self.mm = MoneyManager(
             initial_capital=balance,
             strategy=self.strategy,
-            base_risk_pct=0.01,
+            base_risk_pct=0.02,
         )
         _state['account'] = account
         self._running = True
@@ -304,12 +308,26 @@ class DTEEngine:
                 sym = p.get('symbol', '')
                 vol = p.get('volume', 0)
                 pc  = _G if pl >= 0 else _R
-                summary.info(f'  {t} {sym:30} Vol:{vol} | PnL:{pc}{pl:+.2f}${_RS}')
+                summary.info(f'  {t} {sym:30} Vol:{vol:.2f} | PnL:{pc}{pl:+.2f}${_RS}')
         summary.info(f'{"═"*60}')
 
     def _manage_open_positions(self):
-        """Gestion active : Breakeven (profit≥50% SL) et Trailing Stop (profit≥100% SL)."""
-        for pos in self.provider.get_open_positions():
+        """Gestion active : Breakeven (profit≥50% SL) et Trailing Stop (profit≥100% SL).
+
+        Le SL de référence pour les triggers est le SL STRUCTUREL INITIAL stocké dans
+        _pos_init_sl, pas le SL courant MT5. Cela évite deux bugs :
+          1. Après auto-expansion (×1.5–×3.375), le SL MT5 trop large → trigger jamais atteint
+          2. Après BE, sl MT5 ≈ entry → sl_dist ≈ 0 → trailing uselessly serré
+        """
+        positions = self.provider.get_open_positions()
+
+        # Nettoyage des tickets fermés
+        open_tickets = {pos.get('ticket') for pos in positions}
+        for t in list(self._pos_init_sl.keys()):
+            if t not in open_tickets:
+                del self._pos_init_sl[t]
+
+        for pos in positions:
             ticket  = pos.get('ticket')
             is_buy  = pos.get('type', 0) == 0
             entry   = pos.get('price_open', 0.0)
@@ -317,31 +335,39 @@ class DTEEngine:
             sl      = pos.get('sl',  0.0)
             tp      = pos.get('tp',  0.0)
 
-            if sl == 0.0 or entry == 0.0:
+            if entry == 0.0 or sl == 0.0:
                 continue
-            sl_dist     = abs(entry - sl)
-            if sl_dist  < 1e-10:
+            sl_dist_mt5 = abs(entry - sl)
+            if sl_dist_mt5 < 1e-10:
                 continue
+
+            # SL de référence : structurel initial si connu, sinon SL MT5 courant
+            ref_sl_dist = self._pos_init_sl.get(ticket, sl_dist_mt5)
+            if ref_sl_dist < 1e-10:
+                ref_sl_dist = sl_dist_mt5
+
             profit_dist = (current - entry) if is_buy else (entry - current)
 
             # ── Breakeven ─────────────────────────────────────────────────────
-            if profit_dist >= sl_dist * BE_TRIGGER:
-                buffer = sl_dist * 0.02
+            if profit_dist >= ref_sl_dist * BE_TRIGGER:
+                buffer = ref_sl_dist * 0.02
                 be_sl  = round((entry + buffer) if is_buy else (entry - buffer), 5)
                 needs_be = (is_buy and sl < be_sl - 1e-6) or (not is_buy and sl > be_sl + 1e-6)
                 if needs_be and self.provider.modify_position_sl(ticket, be_sl, tp):
-                    logger.info(f'[BE] #{ticket} {pos["symbol"]} → SL déplacé à {be_sl} (breakeven)')
+                    logger.info(f'[BE] #{ticket} {pos["symbol"]} → SL={be_sl:.5f} '
+                                f'(profit:{profit_dist:.4f} ≥ {ref_sl_dist*BE_TRIGGER:.4f})')
 
             # ── Trailing Stop ─────────────────────────────────────────────────
-            if profit_dist >= sl_dist * TRAIL_TRIGGER:
+            if profit_dist >= ref_sl_dist * TRAIL_TRIGGER:
+                trail_dist = ref_sl_dist * TRAIL_DISTANCE
                 new_sl = round(
-                    (current - sl_dist * TRAIL_DISTANCE) if is_buy
-                    else (current + sl_dist * TRAIL_DISTANCE), 5
+                    (current - trail_dist) if is_buy
+                    else (current + trail_dist), 5
                 )
                 needs_trail = (is_buy and new_sl > sl + 1e-6) or (not is_buy and new_sl < sl - 1e-6)
                 if needs_trail and self.provider.modify_position_sl(ticket, new_sl, tp):
-                    logger.info(f'[TRAIL] #{ticket} {pos["symbol"]} → SL={new_sl} '
-                                f'(profit:{profit_dist:.4f} > {sl_dist*TRAIL_TRIGGER:.4f})')
+                    logger.info(f'[TRAIL] #{ticket} {pos["symbol"]} → SL={new_sl:.5f} '
+                                f'(profit:{profit_dist:.4f} ≥ {ref_sl_dist*TRAIL_TRIGGER:.4f})')
 
     def _process_symbol(self, symbol: str, is_active: bool) -> dict:
         """Calcule le signal pour un symbole et exécute si nécessaire."""
@@ -453,10 +479,9 @@ class DTEEngine:
         if time.time() - last_order_time < self._order_cooldown_sec:
             return
 
-        # Vérification MT5 — pas de position déjà ouverte sur ce symbole
+        # Vérification MT5 — limite de positions simultanées par symbole
         existing = self.provider.get_open_positions(symbol)
-        if existing:
-            logger.info(f'Position deja ouverte sur {symbol} — skip')
+        if len(existing) >= MAX_POSITIONS_PER_SYMBOL:
             return
 
         # Marquer le cooldown AVANT l'envoi (bloque les cycles suivants même si MT5 est lent)
@@ -478,7 +503,12 @@ class DTEEngine:
             actual_sl  = result.get('sl', sl_price)
             actual_tp  = result.get('tp', tp_price)
             actual_vol = result.get('volume', volume)
-            msg = (f'TRADE {action_str} {symbol} | Vol:{actual_vol:.2f} | Prix:{result["price"]:.4f} '
+            actual_px  = result.get('price', 0.0)
+            # Mémoriser la distance SL STRUCTURELLE initiale (avant toute expansion/BE)
+            ticket = result.get('ticket')
+            if ticket and sl_price > 0 and actual_px > 0:
+                self._pos_init_sl[ticket] = abs(actual_px - sl_price)
+            msg = (f'TRADE {action_str} {symbol} | Vol:{actual_vol:.2f} | Prix:{actual_px:.4f} '
                    f'| SL:{actual_sl:.4f} TP:{actual_tp:.4f} RR:{rr} ATR:{atr_p:.1f}p '
                    f'| Score:{score}{" [REDUIT]" if reduce_size else ""}')
             logger.info(msg)
